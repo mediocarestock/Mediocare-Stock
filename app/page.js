@@ -59,7 +59,6 @@ export default function Home() {
   const formatNum = (amount) => new Intl.NumberFormat('en-KE', { maximumFractionDigits: 0 }).format(amount);
   const branchName = branches.find(b => b.id === selectedBranch)?.name || '';
 
-  // --- DYNAMIC STAFF HANDLING ---
   const handleStaffChange = (index, field, value) => {
     const newStaff = [...staff];
     newStaff[index][field] = value;
@@ -69,62 +68,119 @@ export default function Home() {
   const addStaff = () => setStaff([...staff, { name: '', actual: '', system: '', credit: '' }]);
   const removeStaff = (index) => setStaff(staff.filter((_, i) => i !== index));
 
-  // --- NATIVE PDF CHART ENGINE ---
-  const drawBarChart = (doc, startX, startY, width, height, data, title, yLabel) => {
-    // Determine max value for scaling
+  // --- PROFESSIONAL PDF CHART ENGINE ---
+  const drawBarChart = (doc, startX, startY, width, height, data, title) => {
+    // 1. Determine min/max to handle negative variances
     let maxVal = 0;
+    let minVal = 0;
     data.forEach(d => {
       if (d.val1 > maxVal) maxVal = d.val1;
+      if (d.val1 < minVal) minVal = d.val1;
       if (d.val2 > maxVal) maxVal = d.val2;
+      if (d.val2 < minVal) minVal = d.val2;
     });
-    if (maxVal === 0) maxVal = 1;
+    
+    // Add 10% padding to top and bottom
+    const range = Math.max(maxVal - minVal, 1);
+    maxVal += range * 0.15;
+    minVal -= range * 0.15;
 
-    // Draw Title
-    doc.setFontSize(10);
+    const zeroLineY = startY + height - ((0 - minVal) / (maxVal - minVal)) * height;
+
+    // Title
+    doc.setFontSize(9);
     doc.setFont('helvetica', 'bold');
     doc.text(title, startX + width / 2, startY - 5, { align: 'center' });
 
-    // Draw Axes
-    doc.setDrawColor(0);
-    doc.line(startX, startY + height, startX, startY); // Y-axis
-    doc.line(startX, startY + height, startX + width, startY + height); // X-axis
+    // Axes
+    doc.setDrawColor(150);
+    doc.setLineWidth(0.5);
+    doc.line(startX, startY, startX, startY + height); // Y-axis
+    doc.line(startX, zeroLineY, startX + width, zeroLineY); // X-axis (at zero)
 
-    // Draw Y-axis Labels (approximate)
-    doc.setFontSize(8);
+    // Y-axis Labels
+    doc.setFontSize(7);
     doc.setFont('helvetica', 'normal');
-    doc.text(formatNum(maxVal), startX - 5, startY + 5, { align: 'right' });
-    doc.text('0', startX - 5, startY + height, { align: 'right' });
+    doc.setTextColor(100);
+    doc.text(formatNum(maxVal), startX - 2, startY + 4, { align: 'right' });
+    doc.text('0', startX - 2, zeroLineY + 2, { align: 'right' });
+    if (minVal < 0) doc.text(formatNum(minVal), startX - 2, startY + height, { align: 'right' });
 
     // Draw Bars
     const barGroupWidth = width / data.length;
-    const barWidth = (barGroupWidth * 0.8) / 2;
+    const barWidth = (barGroupWidth * 0.7) / 2;
     
     data.forEach((d, i) => {
-      const groupX = startX + (i * barGroupWidth) + (barGroupWidth * 0.1);
+      const groupX = startX + (i * barGroupWidth) + (barGroupWidth * 0.15);
       
-      // Bar 1 (Actual / Before)
-      const h1 = (d.val1 / maxVal) * height;
-      doc.setFillColor(50, 50, 50); // Dark gray
-      doc.rect(groupX, startY + height - h1, barWidth, h1, 'F');
+      // Bar 1
+      const h1 = ((d.val1 - 0) / (maxVal - minVal)) * height;
+      const y1 = zeroLineY - h1;
+      doc.setFillColor(41, 128, 185); // Blue
+      doc.rect(groupX, h1 > 0 ? y1 : zeroLineY, barWidth, Math.abs(h1), 'F');
       
-      // Bar 2 (System / After)
-      const h2 = (d.val2 / maxVal) * height;
-      doc.setFillColor(150, 150, 150); // Light gray
-      doc.rect(groupX + barWidth + 2, startY + height - h2, barWidth, h2, 'F');
+      // Bar 2
+      const h2 = ((d.val2 - 0) / (maxVal - minVal)) * height;
+      const y2 = zeroLineY - h2;
+      doc.setFillColor(211, 84, 0); // Orange
+      doc.rect(groupX + barWidth + 1, h2 > 0 ? y2 : zeroLineY, barWidth, Math.abs(h2), 'F');
+
+      // Value Labels (on top of bars)
+      doc.setFontSize(6);
+      doc.setTextColor(0);
+      if (d.val1 !== 0) doc.text(formatNum(d.val1), groupX + (barWidth/2), y1 - 2, { align: 'center' });
+      if (d.val2 !== 0) doc.text(formatNum(d.val2), groupX + barWidth + 1 + (barWidth/2), y2 - 2, { align: 'center' });
 
       // X-axis Label
-      doc.setFontSize(8);
-      doc.text(d.label, groupX + barWidth, startY + height + 5, { align: 'center' });
+      doc.setFontSize(7);
+      doc.text(d.label.substring(0, 6), groupX + barWidth, startY + height + 4, { align: 'center' });
     });
 
     // Legend
-    doc.setFillColor(50, 50, 50);
-    doc.rect(startX + width - 60, startY - 15, 5, 5, 'F');
-    doc.text('Actual/Before', startX + width - 52, startY - 10);
+    doc.setFillColor(41, 128, 185);
+    doc.rect(startX + width - 50, startY - 10, 4, 4, 'F');
+    doc.setFontSize(7);
+    doc.setTextColor(0);
+    doc.text('Actual', startX + width - 44, startY - 7);
     
-    doc.setFillColor(150, 150, 150);
-    doc.rect(startX + width - 60, startY - 8, 5, 5, 'F');
-    doc.text('System/After', startX + width - 52, startY - 3);
+    doc.setFillColor(211, 84, 0);
+    doc.rect(startX + width - 25, startY - 10, 4, 4, 'F');
+    doc.text('System', startX + width - 19, startY - 7);
+  };
+
+  // --- SMART NARRATIVE GENERATOR ---
+  const generateNarrative = () => {
+    let text = [];
+    
+    // Sales
+    if (stockAndSalesResults.salesVariance > 0) {
+      text.push(`Positive sales variance of Ksh ${formatKsh(stockAndSalesResults.salesVariance)} indicates cash sales exceeding system records (unrecorded cash/timing).`);
+    } else if (stockAndSalesResults.salesVariance < 0) {
+      text.push(`Negative sales variance of Ksh ${formatKsh(Math.abs(stockAndSalesResults.salesVariance))} indicates system sales exceeded actual cash collected, which may signal uncollected credit or posting errors.`);
+    } else {
+      text.push(`Sales are perfectly reconciled with no variance.`);
+    }
+
+    // Stock
+    if (stockAndSalesResults.grossStockVariance > 0) {
+      text.push(`Stock take revealed a shortage of Ksh ${formatKsh(stockAndSalesResults.grossStockVariance)} (${stockAndSalesResults.stockVariancePercentage?.toFixed(2)}% of opening stock).`);
+    } else if (stockAndSalesResults.grossStockVariance < 0) {
+      text.push(`Physical stock exceeded book value by Ksh ${formatKsh(Math.abs(stockAndSalesResults.grossStockVariance))} (Stock Surplus).`);
+    }
+
+    // Reconciliation
+    if (stockAndSalesResults.grossStockShortage > 0 && stockAndSalesResults.positiveSalesVariance > 0) {
+      text.push(`The positive sales variance was applied to offset the stock shortage, leaving a residual stock loss of Ksh ${formatKsh(stockAndSalesResults.residualStockLoss)}.`);
+    }
+
+    // Debt
+    if (debtResults.netDebtReduction > 0) {
+      text.push(`Debt reduced by Ksh ${formatKsh(debtResults.netDebtReduction)} (${debtResults.debtReductionPercentage?.toFixed(2)}%) to Ksh ${formatKsh(debtResults.adjustedClosingDebt)}.`);
+    } else if (debtResults.netDebtReduction < 0) {
+      text.push(`ADVERSE: Debt increased by Ksh ${formatKsh(Math.abs(debtResults.netDebtReduction))}. Credit control and collections require immediate review.`);
+    }
+
+    return text;
   };
 
   // --- PDF GENERATION ---
@@ -143,7 +199,7 @@ export default function Home() {
     doc.text(`${branchName.toUpperCase()} — STOCK CONTROL & FINANCIAL REPORT`, pageWidth / 2, 28, { align: 'center' });
     doc.setFontSize(9);
     doc.setFont('helvetica', 'normal');
-    doc.text(`Reporting Period: ${periodStart} to ${periodEnd}`, pageWidth / 2, 34, { align: 'center' });
+    doc.text(`Period: ${periodStart} to ${periodEnd} | Currency: KES`, pageWidth / 2, 34, { align: 'center' });
 
     // 1. EXECUTIVE SUMMARY
     doc.setFontSize(11);
@@ -153,38 +209,35 @@ export default function Home() {
     doc.setFontSize(9);
     doc.setFont('helvetica', 'normal');
     let summaryY = 52;
-    
-    // Dynamic summary text
-    const varType = stockAndSalesResults.salesVariance >= 0 ? 'surplus' : 'shortage';
-    const stockType = stockAndSalesResults.grossStockVariance >= 0 ? 'loss' : 'surplus';
-    
-    doc.text(`• Credit-adjusted sales ${varType}: Ksh ${formatKsh(Math.abs(stockAndSalesResults.salesVariance))}`, 14, summaryY); summaryY += 6;
-    doc.text(`• Stock ${stockType}: Ksh ${formatKsh(Math.abs(stockAndSalesResults.grossStockVariance))}; offset by sales variance.`, 14, summaryY); summaryY += 6;
-    doc.text(`• Residual stock loss: Ksh ${formatKsh(stockAndSalesResults.residualStockLoss)}`, 14, summaryY); summaryY += 6;
-    doc.text(`• Debt reduced by Ksh ${formatKsh(debtResults.netDebtReduction)} to Ksh ${formatKsh(debtResults.adjustedClosingDebt)}.`, 14, summaryY); summaryY += 6;
+    const narratives = generateNarrative();
+    narratives.forEach(text => {
+      const splitText = doc.splitTextToSize(`• ${text}`, pageWidth - 28);
+      doc.text(splitText, 14, summaryY);
+      summaryY += (splitText.length * 5) + 2;
+    });
 
-    // 2. STOCK POSITION AND OFFSET
+    // 2. STOCK POSITION
     doc.setFontSize(11);
     doc.setFont('helvetica', 'bold');
-    doc.text('2. Stock Position and Offset', 14, summaryY + 5);
+    doc.text('2. Stock Position & Offset', 14, summaryY + 5);
     
     autoTable(doc, {
       startY: summaryY + 10,
-      head: [['Item', 'Ksh', 'Note']],
+      head: [['Item', 'Ksh', 'Remarks']],
       body: [
-        ['Stock before stock take', formatKsh(num(openingStock)), 'Opening'],
-        ['Stock after stock take', formatKsh(num(physicalStock)), 'Closing'],
-        ['Stock loss/surplus', formatKsh(stockAndSalesResults.grossStockVariance), `${(stockAndSalesResults.stockVariancePercentage || 0).toFixed(2)}% of opening`],
-        ['Sales surplus/shortage available', formatKsh(stockAndSalesResults.salesVariance), 'Credit-adjusted'],
-        ['Less: applied to stock loss', `(${formatKsh(stockAndSalesResults.salesOffset)})`, 'Full offset' ],
-        ['Residual stock loss', formatKsh(stockAndSalesResults.residualStockLoss), 'After offset'],
+        ['Stock before stock take', formatKsh(num(openingStock)), 'Opening valuation'],
+        ['Stock after stock take', formatKsh(num(physicalStock)), 'Physical count'],
+        [`Stock ${stockAndSalesResults.grossStockVariance >= 0 ? 'Shortage' : 'Surplus'}`, formatKsh(Math.abs(stockAndSalesResults.grossStockVariance)), `${(stockAndSalesResults.stockVariancePercentage || 0).toFixed(2)}% of opening`],
+        ['Sales Variance Available', formatKsh(stockAndSalesResults.salesVariance), 'Credit-adjusted'],
+        ['Less: Applied to offset', `(${formatKsh(stockAndSalesResults.salesOffset)})`, 'Transferred from sales'],
+        ['Residual Stock Loss', formatKsh(stockAndSalesResults.residualStockLoss), 'Added to debt'],
       ],
       theme: 'grid',
-      headStyles: { fillColor: [0, 51, 102] },
+      headStyles: { fillColor: [44, 62, 80] },
       styles: { fontSize: 8 }
     });
 
-    // 3. SALES RECONCILIATION (CREDIT-ADJUSTED)
+    // 3. SALES RECONCILIATION
     doc.setFontSize(11);
     doc.text('3. Sales Reconciliation (Credit-Adjusted)', 14, doc.lastAutoTable.finalY + 10);
     
@@ -194,8 +247,11 @@ export default function Home() {
       return [s.name, formatKsh(num(s.actual)), formatKsh(num(s.system)), formatKsh(num(s.credit)), formatKsh(adjSys), formatKsh(variance)];
     });
     
-    // Add unallocated and total
-    salesTableBody.push(['Unallocated', formatKsh(num(unallocatedActual)), formatKsh(num(unallocatedSystem)), formatKsh(num(unallocatedCredit)), formatKsh(num(unallocatedSystem) - num(unallocatedCredit)), formatKsh(num(unallocatedActual) - (num(unallocatedSystem) - num(unallocatedCredit)))]);
+    if (num(unallocatedActual) > 0 || num(unallocatedSystem) > 0) {
+      const adjUnalloc = num(unallocatedSystem) - num(unallocatedCredit);
+      salesTableBody.push(['Unallocated', formatKsh(num(unallocatedActual)), formatKsh(num(unallocatedSystem)), formatKsh(num(unallocatedCredit)), formatKsh(adjUnalloc), formatKsh(num(unallocatedActual) - adjUnalloc)]);
+    }
+    
     salesTableBody.push(['Branch Total', formatKsh(totalActual), formatKsh(totalSystem), formatKsh(totalCredit), formatKsh(adjustedSystemSales), formatKsh(stockAndSalesResults.salesVariance)]);
 
     autoTable(doc, {
@@ -203,64 +259,76 @@ export default function Home() {
       head: [['Staff', 'Actual Cash', 'System Sales', 'Credit Sales', 'Adj. System', 'Variance']],
       body: salesTableBody,
       theme: 'striped',
-      headStyles: { fillColor: [41, 128, 185] },
-      styles: { fontSize: 8 }
+      headStyles: { fillColor: [44, 62, 80] },
+      styles: { fontSize: 8 },
+      didParseCell: function (data) {
+        // Highlight negative variances in red
+        if (data.section === 'body' && data.column.index === 5) {
+          const val = data.cell.text[0];
+          if (val.includes('-')) {
+            data.cell.styles.textColor = [192, 57, 43];
+          }
+        }
+      }
     });
 
-    // 4. DEBT POSITION
+    // 4. DEBT MOVEMENT
     doc.setFontSize(11);
     doc.setFont('helvetica', 'bold');
     doc.text('4. Branch Account Debt Movement', 14, doc.lastAutoTable.finalY + 10);
 
     autoTable(doc, {
       startY: doc.lastAutoTable.finalY + 15,
-      head: [['Position', 'Ksh', 'Change %']],
+      head: [['Position', 'Ksh', 'Remarks']],
       body: [
-        [`Standing debt as at ${openingDebtDate}`, `(${formatKsh(num(openingDebt))})`, '—'],
-        [`Standing debt as at ${closingDebtDate}`, `(${formatKsh(num(originalClosingDebt))})`, '—'],
-        ['Net debt reduction (original)', formatKsh(debtResults.grossDebtReduction), `${(debtResults.debtReductionPercentage || 0).toFixed(2)}%`],
-        ['Add: Residual stock loss', formatKsh(stockAndSalesResults.residualStockLoss), 'Absorbed'],
-        ['Adjusted closing debt', `(${formatKsh(debtResults.adjustedClosingDebt)})`, 'Adjusted'],
-        ['Actual Net Reduction', formatKsh(debtResults.netDebtReduction), `${((debtResults.netDebtReduction / num(openingDebt)) * 100 || 0).toFixed(2)}%`],
+        [`Standing debt as at ${openingDebtDate}`, `(${formatKsh(num(openingDebt))})`, 'Opening'],
+        [`Standing debt as at ${closingDebtDate}`, `(${formatKsh(num(originalClosingDebt))})`, 'Original closing'],
+        ['Net debt reduction (Original)', formatKsh(debtResults.grossDebtReduction), `${(debtResults.debtReductionPercentage || 0).toFixed(2)}% change`],
+        ['Add: Residual stock loss', formatKsh(stockAndSalesResults.residualStockLoss), 'Absorbed into debt'],
+        ['Adjusted closing debt', `(${formatKsh(debtResults.adjustedClosingDebt)})`, 'Final obligation'],
+        ['Actual Net Debt Reduction', formatKsh(debtResults.netDebtReduction), 'True reduction'],
       ],
       theme: 'grid',
-      headStyles: { fillColor: [39, 174, 96] },
+      headStyles: { fillColor: [44, 62, 80] },
       styles: { fontSize: 8 }
     });
 
     // 5. GRAPHICAL ANALYSIS (NEW PAGE)
     doc.addPage();
-    doc.setFontSize(12);
+    doc.setFontSize(11);
     doc.setFont('helvetica', 'bold');
     doc.text('5. Graphical Analysis', 14, 20);
 
-    // Chart 1: Sales (Actual vs Adjusted System per person)
-    const salesChartData = staff.slice(0, 5).map(s => ({
-      label: s.name.substring(0, 8),
+    // Chart 1: Individual Sales (Actual vs Adjusted System)
+    const salesChartData = staff.slice(0, 6).map(s => ({
+      label: s.name,
       val1: num(s.actual),
       val2: num(s.system) - num(s.credit)
     }));
-    // Add Branch total to chart
     salesChartData.push({ label: 'Branch', val1: totalActual, val2: adjustedSystemSales });
 
-    drawBarChart(doc, 20, 40, 170, 60, salesChartData, 'Individual Sales: Actual vs Adjusted System', 'Ksh');
+    drawBarChart(doc, 20, 40, 170, 60, salesChartData, 'Actual vs Adjusted System Sales per Staff');
 
-    // Chart 2: Stock and Debt
-    drawBarChart(doc, 20, 130, 80, 50, [
-      { label: 'Before', val1: num(openingStock), val2: 0 },
-      { label: 'After', val1: num(physicalStock), val2: 0 }
-    ], 'Stock Value Movement', 'Ksh');
+    // Chart 2: Variance vs Stock Loss
+    const reconData = [
+      { label: 'Stock Loss', val1: stockAndSalesResults.grossStockShortage, val2: 0 },
+      { label: 'Sales Offset', val1: stockAndSalesResults.salesOffset, val2: 0 },
+      { label: 'Residual Loss', val1: stockAndSalesResults.residualStockLoss, val2: 0 }
+    ];
+    drawBarChart(doc, 20, 130, 80, 50, reconData, 'Stock Loss Reconciliation');
 
-    drawBarChart(doc, 110, 130, 80, 50, [
+    // Chart 3: Debt
+    const debtData = [
       { label: 'Opening', val1: num(openingDebt), val2: 0 },
       { label: 'Adjusted', val1: debtResults.adjustedClosingDebt, val2: 0 }
-    ], 'Debt Movement', 'Ksh');
+    ];
+    drawBarChart(doc, 110, 130, 80, 50, debtData, 'Debt Movement (Ksh)');
 
     // Footer on every page
     const pageCount = doc.internal.getNumberOfPages();
     for (let i = 1; i <= pageCount; i++) {
       doc.setPage(i);
-      doc.setFontSize(8);
+      doc.setFontSize(7);
       doc.setTextColor(150);
       doc.text(`Generated on ${new Date().toLocaleString()} | Page ${i} of ${pageCount}`, pageWidth / 2, pageHeight - 10, { align: 'center' });
     }
@@ -298,7 +366,7 @@ export default function Home() {
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
         
-        {/* LEFT COLUMN: INPUTS */}
+        {/* LEFT COLUMN */}
         <div>
           <div style={cardStyle}>
             <h3 style={{ marginTop: 0 }}>1. Stock Data</h3>
@@ -351,7 +419,7 @@ export default function Home() {
           </div>
         </div>
 
-        {/* RIGHT COLUMN: STAFF & RESULTS */}
+        {/* RIGHT COLUMN */}
         <div>
           <div style={cardStyle}>
             <h3 style={{ marginTop: 0, display: 'flex', justifyContent: 'space-between' }}>
@@ -395,7 +463,7 @@ export default function Home() {
           
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
             <button onClick={generatePDF} style={{ width: '100%', padding: '15px', backgroundColor: '#000', color: '#fff', fontSize: '16px', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>
-              Download Professional PDF Report
+              Download Smart PDF Report
             </button>
           </div>
         </div>
