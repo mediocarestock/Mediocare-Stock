@@ -138,7 +138,8 @@ export default function Home() {
         period_end: periodEnd,
         branch_actual_sales: finalBranchActual,
         branch_system_sales: finalBranchSystem,
-        branch_credit_sales: finalBranchCredit
+        branch_credit_sales: finalBranchCredit,
+        prev_closing_stock: num(prevClosingStock) // SAVE MANUAL STOCK TO DB
       };
 
       if (editingReportId) {
@@ -209,9 +210,7 @@ export default function Home() {
     setBranchActual(report.branch_actual_sales || '');
     setBranchSystem(report.branch_system_sales || '');
     setBranchCredit(report.branch_credit_sales || '');
-
-    // We clear the manual previous stock on edit so they can re-enter if needed
-    setPrevClosingStock('');
+    setPrevClosingStock(report.prev_closing_stock || ''); // RELOAD MANUAL STOCK FOR EDITING
 
     if (report.sales_records && report.sales_records.length > 0) {
       setStaff(report.sales_records.map(sr => ({
@@ -338,7 +337,7 @@ export default function Home() {
         closingDebtDate: report.debt_records?.[0]?.closing_debt_date || 'N/A',
         results, debtResults, staff: staffData,
         branchActual: tAct, branchSystem: tSys, branchCredit: tCre,
-        previousStock: null // We don't store manual previous stock in DB for now, so history view won't show the progress analysis
+        previousStock: report.prev_closing_stock > 0 ? { amount: report.prev_closing_stock, date: 'Manual Entry' } : null
       };
     } else {
       return {
@@ -348,7 +347,7 @@ export default function Home() {
         openingDebtDate, closingDebtDate, results: stockAndSalesResults, debtResults,
         staff: staff.map(s => ({ name: s.name || 'Unnamed', actual: num(s.actual), system: num(s.system), credit: num(s.credit) })),
         branchActual: finalBranchActual, branchSystem: finalBranchSystem, branchCredit: finalBranchCredit,
-        previousStock: num(prevClosingStock) > 0 ? { amount: num(prevClosingStock), date: 'Previous Period (Manual)' } : null
+        previousStock: num(prevClosingStock) > 0 ? { amount: num(prevClosingStock), date: 'Manual Entry' } : null
       };
     }
   };
@@ -475,20 +474,27 @@ export default function Home() {
       }
     });
 
-    // 2. STOCK POSITION
+    // 2. STOCK POSITION (UPDATED TO SHOW PREVIOUS STOCK)
     doc.setFontSize(11); doc.setFont('helvetica', 'bold');
     doc.text('2. Stock Position and Offset', 14, summaryY + 5);
+    
+    const stockTableBody = [];
+    if (data.previousStock && data.previousStock.amount !== null) {
+      stockTableBody.push(['Previous Closing Stock', formatKsh(data.previousStock.amount), 'Manual Baseline']);
+    }
+    stockTableBody.push(
+      ['Stock before stock take', formatKsh(data.openingStock), 'Opening (Book)'],
+      ['Stock after stock take', formatKsh(data.physicalStock), 'Physical (Closing)'],
+      ['Gross Stock Variance', formatKsh(data.results.grossStockVariance), `${(data.results.stockVariancePercentage || 0).toFixed(2)}% of opening`],
+      ['Positive Sales Variance', formatKsh(data.results.salesVariance), 'Credit-adjusted'],
+      ['Less: Applied to offset', `(${formatKsh(data.results.salesOffset)})`, 'Transferred'],
+      ['Residual Stock Loss', formatKsh(data.results.residualStockLoss), 'Added to debt']
+    );
+
     autoTable(doc, {
       startY: summaryY + 10,
       head: [['Item', 'Ksh', 'Remarks']],
-      body: [
-        ['Stock before stock take', formatKsh(data.openingStock), 'Opening'],
-        ['Stock after stock take', formatKsh(data.physicalStock), 'Physical'],
-        ['Gross Stock Variance', formatKsh(data.results.grossStockVariance), `${(data.results.stockVariancePercentage || 0).toFixed(2)}% of opening`],
-        ['Positive Sales Variance', formatKsh(data.results.salesVariance), 'Credit-adjusted'],
-        ['Less: Applied to offset', `(${formatKsh(data.results.salesOffset)})`, 'Transferred'],
-        ['Residual Stock Loss', formatKsh(data.results.residualStockLoss), 'Added to debt'],
-      ],
+      body: stockTableBody,
       theme: 'grid', headStyles: { fillColor: [44, 62, 80] }, styles: { fontSize: 8 }
     });
 
@@ -874,9 +880,12 @@ export default function Home() {
                   <th style={{ padding: '8px', textAlign: 'left', border: '1px solid #000' }}>Note</th>
                 </tr></thead>
                 <tbody>
-                  <tr><td style={{ padding: '8px', border: '1px solid #000' }}>Stock before stock take</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.openingStock)}</td><td style={{ padding: '8px', border: '1px solid #000' }}>Opening</td></tr>
-                  <tr><td style={{ padding: '8px', border: '1px solid #000' }}>Stock after stock take</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.physicalStock)}</td><td style={{ padding: '8px', border: '1px solid #000' }}>Closing</td></tr>
-                  <tr><td style={{ padding: '8px', border: '1px solid #000', fontWeight: 'bold' }}>Stock loss</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000', fontWeight: 'bold' }}>{formatKsh(viewingReport.results.grossStockVariance)}</td><td style={{ padding: '8px', border: '1px solid #000' }}>{(viewingReport.results.stockVariancePercentage || 0).toFixed(2)}% of opening</td></tr>
+                  {viewingReport.previousStock && viewingReport.previousStock.amount !== null && (
+                    <tr><td style={{ padding: '8px', border: '1px solid #000', fontStyle: 'italic' }}>Previous Closing Stock (Manual)</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000', fontStyle: 'italic' }}>{formatKsh(viewingReport.previousStock.amount)}</td><td style={{ padding: '8px', border: '1px solid #000', fontStyle: 'italic' }}>Baseline</td></tr>
+                  )}
+                  <tr><td style={{ padding: '8px', border: '1px solid #000' }}>Stock before stock take</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.openingStock)}</td><td style={{ padding: '8px', border: '1px solid #000' }}>Opening (Book)</td></tr>
+                  <tr><td style={{ padding: '8px', border: '1px solid #000' }}>Stock after stock take</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.physicalStock)}</td><td style={{ padding: '8px', border: '1px solid #000' }}>Physical (Closing)</td></tr>
+                  <tr><td style={{ padding: '8px', border: '1px solid #000', fontWeight: 'bold' }}>Gross Stock Variance</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000', fontWeight: 'bold' }}>{formatKsh(viewingReport.results.grossStockVariance)}</td><td style={{ padding: '8px', border: '1px solid #000' }}>{(viewingReport.results.stockVariancePercentage || 0).toFixed(2)}% of opening</td></tr>
                   <tr><td style={{ padding: '8px', border: '1px solid #000' }}>Sales surplus available</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.results.salesVariance)}</td><td style={{ padding: '8px', border: '1px solid #000' }}>Credit-adjusted</td></tr>
                   <tr><td style={{ padding: '8px', border: '1px solid #000' }}>Less: applied to stock loss</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>({formatKsh(viewingReport.results.salesOffset)})</td><td style={{ padding: '8px', border: '1px solid #000' }}>Full offset</td></tr>
                   <tr><td style={{ padding: '8px', border: '1px solid #000', fontWeight: 'bold' }}>Residual Stock Loss</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000', fontWeight: 'bold', color: '#dc3545' }}>{formatKsh(viewingReport.results.residualStockLoss)}</td><td style={{ padding: '8px', border: '1px solid #000' }}>Added to debt</td></tr>
