@@ -274,11 +274,46 @@ export default function Home() {
     setIsLoadingData(false);
   };
 
-  // --- SMART PDF ENGINE ---
+  // --- SHARED DATA BUILDER FOR PDF & MODAL ---
+  const buildReportData = (isHistory = false, report = null) => {
+    if (isHistory) {
+      const oStk = report.stock_takes?.[0]?.opening_stock || 0;
+      const pStk = report.stock_takes?.[0]?.physical_stock || 0;
+      const oDebt = report.debt_records?.[0]?.opening_debt || 0;
+      const cDebt = report.debt_records?.[0]?.original_closing_debt || 0;
+      const staffData = (report.sales_records || []).map(sr => ({
+        name: sr.salespeople?.name || '', actual: sr.actual_sales || 0, system: sr.system_sales || 0, credit: sr.credit_sales || 0
+      }));
+      const tAct = staffData.reduce((s, x) => s + x.actual, 0);
+      const tSys = staffData.reduce((s, x) => s + x.system, 0);
+      const tCre = staffData.reduce((s, x) => s + x.credit, 0);
+      const results = calculateStockAndSales(oStk, pStk, tAct, tSys - tCre);
+      const debtResults = calculateDebt(oDebt, cDebt, results.residualStockLoss);
+
+      return {
+        branchName: report.branches?.name || 'Unknown',
+        periodStart: report.period_start, periodEnd: report.period_end,
+        openingStock: oStk, physicalStock: pStk, openingDebt: oDebt, originalClosingDebt: cDebt,
+        openingDebtDate: report.debt_records?.[0]?.opening_debt_date || 'N/A',
+        closingDebtDate: report.debt_records?.[0]?.closing_debt_date || 'N/A',
+        results, debtResults, staff: staffData
+      };
+    } else {
+      return {
+        branchName, periodStart, periodEnd,
+        openingStock: num(openingStock), physicalStock: num(physicalStock),
+        openingDebt: num(openingDebt), originalClosingDebt: num(originalClosingDebt),
+        openingDebtDate, closingDebtDate, results: stockAndSalesResults, debtResults,
+        staff: staff.map(s => ({ name: s.name || 'Unnamed', actual: num(s.actual), system: num(s.system), credit: num(s.credit) }))
+      };
+    }
+  };
+
+  // --- PDF ENGINE ---
   const drawBarChart = (doc, startX, startY, width, height, data, title) => {
     let maxVal = 0;
     data.forEach(d => { if (d.val1 > maxVal) maxVal = d.val1; if (d.val2 && d.val2 > maxVal) maxVal = d.val2; });
-    maxVal = maxVal * 1.2;
+    maxVal = maxVal * 1.2 || 100;
 
     doc.setFontSize(9); doc.setFont('helvetica', 'bold');
     doc.text(title, startX + width / 2, startY - 5, { align: 'center' });
@@ -308,10 +343,11 @@ export default function Home() {
     });
   };
 
-  const generateSmartPDF = (data, action = 'save') => {
+  const generatePDF = (data, action = 'save') => {
     const doc = new jsPDF();
     const pageWidth = doc.internal.pageSize.getWidth();
     
+    // HEADER
     doc.setFontSize(16); doc.setFont('helvetica', 'bold'); doc.setTextColor(0);
     doc.text('MEDIOCARE PHARMACEUTICALS LTD', pageWidth / 2, 20, { align: 'center' });
     doc.setFontSize(12);
@@ -319,22 +355,24 @@ export default function Home() {
     doc.setFontSize(9); doc.setFont('helvetica', 'normal');
     doc.text(`Period: ${data.periodStart} to ${data.periodEnd}`, pageWidth / 2, 34, { align: 'center' });
 
+    // NARRATIVE BUILDER
     let narrative = [];
-    const totalVar = data.results.salesVariance;
-    if (totalVar > 0) {
+    if (data.results.salesVariance > 0) {
       const sortedStaff = [...data.staff].sort((a, b) => (b.actual - (b.system - b.credit)) - (a.actual - (a.system - a.credit)));
-      const topDriver1 = sortedStaff[0] ? `${sortedStaff[0].name} (${Math.round(((sortedStaff[0].actual - (sortedStaff[0].system - sortedStaff[0].credit)) / totalVar) * 100)}%)` : '';
-      const topDriver2 = sortedStaff[1] ? `${sortedStaff[1].name} (${Math.round(((sortedStaff[1].actual - (sortedStaff[1].system - sortedStaff[1].credit)) / totalVar) * 100)}%)` : '';
+      const top1 = sortedStaff[0] ? `${sortedStaff[0].name} (${Math.round(((sortedStaff[0].actual - (sortedStaff[0].system - sortedStaff[0].credit)) / data.results.salesVariance) * 100)}%)` : '';
+      const top2 = sortedStaff[1] ? `${sortedStaff[1].name} (${Math.round(((sortedStaff[1].actual - (sortedStaff[1].system - sortedStaff[1].credit)) / data.results.salesVariance) * 100)}%)` : '';
       
-      narrative.push(`• Positive Sales Variance: Ksh ${formatKsh(totalVar)} (Unrecorded cash/transactions).`);
-      if(topDriver1) narrative.push(`• Variance Drivers: ${topDriver1}, ${topDriver2}.`);
-      narrative.push(`• The positive sales variance was applied to offset the stock shortage, leaving a residual stock loss of Ksh ${formatKsh(data.results.residualStockLoss)}.`);
-    } else if (totalVar < 0) {
-      narrative.push(`• Negative Sales Variance: Ksh ${formatKsh(Math.abs(totalVar))} (System sales exceeded actual cash). Requires investigation.`);
+      narrative.push(`• Credit-adjusted sales surplus: Ksh ${formatKsh(data.results.salesVariance)} (${data.results.salesVariancePercentage?.toFixed(2)}%).`);
+      if (top1) narrative.push(`• Variance Drivers: ${top1}, ${top2}.`);
+      narrative.push(`• Stock loss: Ksh ${formatKsh(data.results.grossStockShortage)} (${data.results.stockVariancePercentage?.toFixed(2)}%); fully offset by sales surplus.`);
+      narrative.push(`• Residual surplus after stock-loss offset: Ksh ${formatKsh(data.results.remainingSalesSurplus)}.`);
+    } else {
+      narrative.push(`• Sales shortage: Ksh ${formatKsh(Math.abs(data.results.salesVariance))}. System sales exceeded actual cash.`);
+      narrative.push(`• Stock loss: Ksh ${formatKsh(data.results.grossStockShortage)}. Residual loss to carry forward: Ksh ${formatKsh(data.results.residualStockLoss)}.`);
     }
-    if (data.debtResults.netDebtReduction > 0) narrative.push(`• Debt reduced by Ksh ${formatKsh(data.debtResults.netDebtReduction)} (${data.debtResults.debtReductionPercentage?.toFixed(2)}%) to Ksh ${formatKsh(data.debtResults.adjustedClosingDebt)}.`);
-    else narrative.push(`• ADVERSE: Debt increased by Ksh ${formatKsh(Math.abs(data.debtResults.netDebtReduction))}.`);
+    narrative.push(`• Debt reduced by Ksh ${formatKsh(data.debtResults.netDebtReduction)} (${data.debtResults.debtReductionPercentage?.toFixed(2)}%) to Ksh ${formatKsh(data.debtResults.adjustedClosingDebt)}.`);
 
+    // 1. EXEC SUMMARY
     doc.setFontSize(11); doc.setFont('helvetica', 'bold');
     doc.text('1. Executive Summary', 14, 45);
     doc.setFontSize(9); doc.setFont('helvetica', 'normal');
@@ -344,37 +382,49 @@ export default function Home() {
       doc.text(splitText, 14, summaryY); summaryY += (splitText.length * 5) + 2;
     });
 
+    // 2. STOCK POSITION
     doc.setFontSize(11); doc.setFont('helvetica', 'bold');
-    doc.text('2. Stock Position & Offset', 14, summaryY + 5);
+    doc.text('2. Stock Position and Offset', 14, summaryY + 5);
     autoTable(doc, {
       startY: summaryY + 10,
       head: [['Item', 'Ksh', 'Remarks']],
       body: [
         ['Stock before stock take', formatKsh(data.openingStock), 'Opening'],
         ['Stock after stock take', formatKsh(data.physicalStock), 'Physical'],
-        ['Gross Stock Variance', formatKsh(data.results.grossStockVariance), 'Difference'],
-        ['Less: Positive Sales Offset', `(${formatKsh(data.results.salesOffset)})`, 'Transferred from sales'],
-        ['Residual Stock Loss', formatKsh(data.results.residualStockLoss), 'Added to debt'],
+        ['Stock Variance', formatKsh(data.results.grossStockVariance), `${(data.results.stockVariancePercentage || 0).toFixed(2)}% of opening`],
+        ['Sales Surplus/Shortage', formatKsh(data.results.salesVariance), 'Credit-adjusted'],
+        ['Less: Applied to offset', `(${formatKsh(data.results.salesOffset)})`, 'Transferred'],
+        ['Residual Stock Variance', formatKsh(data.results.residualStockLoss), 'Added to debt'],
       ],
       theme: 'grid', headStyles: { fillColor: [44, 62, 80] }, styles: { fontSize: 8 }
     });
 
+    // 3. SALES RECONCILIATION
     doc.setFontSize(11); doc.setFont('helvetica', 'bold');
-    doc.text('3. Sales Performance Analysis', 14, doc.lastAutoTable.finalY + 10);
+    doc.text('3. Sales Reconciliation (Credit-Adjusted)', 14, doc.lastAutoTable.finalY + 10);
+    
     const salesBody = data.staff.map(s => {
       const adjSys = s.system - s.credit;
       return [s.name, formatKsh(s.actual), formatKsh(s.system), formatKsh(s.credit), formatKsh(adjSys), formatKsh(s.actual - adjSys)];
     });
+    // Add Branch Total
+    salesBody.push(['Branch Total', formatKsh(data.staff.reduce((sum, s) => sum + s.actual, 0)), formatKsh(data.staff.reduce((sum, s) => sum + s.system, 0)), formatKsh(data.staff.reduce((sum, s) => sum + s.credit, 0)), formatKsh(data.staff.reduce((sum, s) => sum + (s.system - s.credit), 0)), formatKsh(data.results.salesVariance)]);
+
     autoTable(doc, {
       startY: doc.lastAutoTable.finalY + 15,
-      head: [['Staff', 'Actual', 'System', 'Credit', 'Adj. System', 'Variance']],
+      head: [['Staff', 'Actual Cash', 'System Sales', 'Credit Sales', 'Adj. System', 'Variance']],
       body: salesBody,
       theme: 'striped', headStyles: { fillColor: [44, 62, 80] }, styles: { fontSize: 8 },
       didParseCell: function (data) {
-        if (data.section === 'body' && data.column.index === 5 && data.cell.text[0].includes('-')) data.cell.styles.textColor = [192, 57, 43];
+        if (data.section === 'body' && data.column.index === 5) {
+          if (data.cell.text[0].includes('-')) data.cell.styles.textColor = [192, 57, 43];
+          else if (data.cell.text[0] !== '-' && data.row.index !== salesBody.length -1) data.cell.styles.textColor = [39, 174, 96];
+        }
+        if (data.row.index === salesBody.length - 1) data.cell.styles.fontStyle = 'bold';
       }
     });
 
+    // 4. DEBT POSITION
     doc.setFontSize(11); doc.setFont('helvetica', 'bold');
     doc.text('4. Branch Account Debt Movement', 14, doc.lastAutoTable.finalY + 10);
     autoTable(doc, {
@@ -388,9 +438,13 @@ export default function Home() {
         ['Adjusted Closing Debt', '-', `(${formatKsh(data.debtResults.adjustedClosingDebt)})`],
         ['Net Debt Reduction', '-', formatKsh(data.debtResults.netDebtReduction)],
       ],
-      theme: 'grid', headStyles: { fillColor: [44, 62, 80] }, styles: { fontSize: 8 }
+      theme: 'grid', headStyles: { fillColor: [44, 62, 80] }, styles: { fontSize: 8 },
+      didParseCell: function (data) {
+        if (data.section === 'body' && data.column.index === 2 && data.row.index === 5) data.cell.styles.textColor = [39, 174, 96];
+      }
     });
 
+    // GRAPHS PAGE
     doc.addPage();
     doc.setFontSize(11); doc.setFont('helvetica', 'bold'); doc.text('5. Graphical Analysis', 14, 20);
     const chartData = data.staff.slice(0, 6).map(s => ({ label: s.name, val1: s.actual, val2: s.system - s.credit }));
@@ -411,155 +465,8 @@ export default function Home() {
     else doc.save(`${data.branchName}_Report.pdf`);
   };
 
-  const handleGenerateHistoryPDF = (report, action) => {
-    const oStk = report.stock_takes?.[0]?.opening_stock || 0;
-    const pStk = report.stock_takes?.[0]?.physical_stock || 0;
-    const oDebt = report.debt_records?.[0]?.opening_debt || 0;
-    const cDebt = report.debt_records?.[0]?.original_closing_debt || 0;
-    
-    const staffData = (report.sales_records || []).map(sr => ({
-      name: sr.salespeople?.name || '', actual: sr.actual_sales || 0, system: sr.system_sales || 0, credit: sr.credit_sales || 0
-    }));
-    const tAct = staffData.reduce((s, x) => s + x.actual, 0);
-    const tSys = staffData.reduce((s, x) => s + x.system, 0);
-    const tCre = staffData.reduce((s, x) => s + x.credit, 0);
 
-    const results = calculateStockAndSales(oStk, pStk, tAct, tSys - tCre);
-    const debtResults = calculateDebt(oDebt, cDebt, results.residualStockLoss);
-
-    generateSmartPDF({ 
-      branchName: report.branches?.name || 'Unknown', periodStart: report.period_start, periodEnd: report.period_end,
-      openingStock: oStk, physicalStock: pStk, openingDebt: oDebt, originalClosingDebt: cDebt,
-      openingDebtDate: report.debt_records?.[0]?.opening_debt_date || 'N/A', closingDebtDate: report.debt_records?.[0]?.closing_debt_date || 'N/A',
-      results, debtResults, staff: staffData 
-    }, action);
-  };
-
-  // --- BUILD LIVE PREVIEW DATA ---
-  const buildLivePreviewData = () => {
-    return { 
-      branchName, periodStart, periodEnd, openingStock: num(openingStock), physicalStock: num(physicalStock),
-      openingDebt: num(openingDebt), originalClosingDebt: num(originalClosingDebt), 
-      openingDebtDate, closingDebtDate, results: stockAndSalesResults, debtResults, 
-      staff: staff.map(s => ({ name: s.name, actual: num(s.actual), system: num(s.system), credit: num(s.credit) }))
-    };
-  };
-
-  // --- BUILD HISTORY PREVIEW DATA ---
-  const buildHistoryPreviewData = (report) => {
-    const oStk = report.stock_takes?.[0]?.opening_stock || 0;
-    const pStk = report.stock_takes?.[0]?.physical_stock || 0;
-    const oDebt = report.debt_records?.[0]?.opening_debt || 0;
-    const cDebt = report.debt_records?.[0]?.original_closing_debt || 0;
-    const staffData = (report.sales_records || []).map(sr => ({
-      name: sr.salespeople?.name || '', actual: sr.actual_sales || 0, system: sr.system_sales || 0, credit: sr.credit_sales || 0
-    }));
-    const tAct = staffData.reduce((s, x) => s + x.actual, 0);
-    const tSys = staffData.reduce((s, x) => s + x.system, 0);
-    const tCre = staffData.reduce((s, x) => s + x.credit, 0);
-
-    const results = calculateStockAndSales(oStk, pStk, tAct, tSys - tCre);
-    const debtResults = calculateDebt(oDebt, cDebt, results.residualStockLoss);
-
-    return { 
-      branchName: report.branches?.name || 'Unknown', periodStart: report.period_start, periodEnd: report.period_end,
-      openingStock: oStk, physicalStock: pStk, openingDebt: oDebt, originalClosingDebt: cDebt,
-      openingDebtDate: report.debt_records?.[0]?.opening_debt_date || 'N/A', closingDebtDate: report.debt_records?.[0]?.closing_debt_date || 'N/A',
-      results, debtResults, staff: staffData 
-    };
-  };
-
-  // --- RENDER DOCUMENT VIEWER ---
-  const renderDocumentViewer = (data) => {
-    const narrative = [];
-    if (data.results.salesVariance > 0) {
-      const sortedStaff = [...data.staff].sort((a, b) => (b.actual - (b.system - b.credit)) - (a.actual - (a.system - a.credit)));
-      const top1 = sortedStaff[0] ? `${sortedStaff[0].name} (${Math.round(((sortedStaff[0].actual - (sortedStaff[0].system - sortedStaff[0].credit)) / data.results.salesVariance) * 100)}%)` : '';
-      narrative.push(`Positive Sales Variance of Ksh ${formatKsh(data.results.salesVariance)} indicates unrecorded cash/timing differences.`);
-      if (top1) narrative.push(`Major variance drivers include ${top1}.`);
-      narrative.push(`The positive variance offsets the stock shortage, leaving a residual loss of Ksh ${formatKsh(data.results.residualStockLoss)}.`);
-    } else if (data.results.salesVariance < 0) {
-      narrative.push(`Negative Sales Variance of Ksh ${formatKsh(Math.abs(data.results.salesVariance))} indicates system sales exceeded actual cash collected.`);
-    }
-    if (data.debtResults.netDebtReduction > 0) narrative.push(`Branch debt decreased by Ksh ${formatKsh(data.debtResults.netDebtReduction)} to a closing balance of Ksh ${formatKsh(data.debtResults.adjustedClosingDebt)}.`);
-    else narrative.push(`ADVERSE: Branch debt increased by Ksh ${formatKsh(Math.abs(data.debtResults.netDebtReduction))}.`);
-
-    return (
-      <div style={{ backgroundColor: '#fff', padding: '40px', borderRadius: '8px', boxShadow: '0 4px 20px rgba(0,0,0,0.15)', maxWidth: '800px', width: '100%', maxHeight: '90vh', overflowY: 'auto' }}>
-        
-        {/* HEADER */}
-        <div style={{ textAlign: 'center', borderBottom: '2px solid #333', paddingBottom: '20px', marginBottom: '20px' }}>
-          <h1 style={{ margin: 0, fontSize: '24px', color: '#000' }}>MEDIOCARE PHARMACEUTICALS LTD</h1>
-          <h2 style={{ margin: '10px 0', fontSize: '18px', color: '#333' }}>{data.branchName.toUpperCase()} — FINANCIAL REPORT</h2>
-          <p style={{ margin: 0, fontSize: '14px', color: '#666' }}>Period: {data.periodStart} to {data.periodEnd}</p>
-        </div>
-
-        {/* SECTION 1: EXEC SUMMARY */}
-        <h3 style={{ fontSize: '16px', borderBottom: '1px solid #ccc', paddingBottom: '5px' }}>1. Executive Summary</h3>
-        <ul style={{ fontSize: '14px', lineHeight: '1.6', color: '#333' }}>
-          {narrative.map((text, i) => <li key={i} style={{ marginBottom: '8px' }}>{text}</li>)}
-        </ul>
-
-        {/* SECTION 2: STOCK */}
-        <h3 style={{ fontSize: '16px', borderBottom: '1px solid #ccc', paddingBottom: '5px', marginTop: '30px' }}>2. Stock Position & Offset</h3>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px', marginTop: '10px' }}>
-          <thead><tr style={{ backgroundColor: '#f5f5f5', borderBottom: '2px solid #ccc' }}>
-            <th style={{ padding: '10px', textAlign: 'left' }}>Item</th><th style={{ padding: '10px', textAlign: 'right' }}>Ksh</th><th style={{ padding: '10px', textAlign: 'left' }}>Remarks</th>
-          </tr></thead>
-          <tbody>
-            <tr style={{ borderBottom: '1px solid #eee' }}><td style={{ padding: '10px' }}>Stock before stock take</td><td style={{ padding: '10px', textAlign: 'right' }}>{formatKsh(data.openingStock)}</td><td style={{ padding: '10px' }}>Opening</td></tr>
-            <tr style={{ borderBottom: '1px solid #eee' }}><td style={{ padding: '10px' }}>Stock after stock take</td><td style={{ padding: '10px', textAlign: 'right' }}>{formatKsh(data.physicalStock)}</td><td style={{ padding: '10px' }}>Physical</td></tr>
-            <tr style={{ borderBottom: '1px solid #eee' }}><td style={{ padding: '10px', fontWeight: 'bold' }}>Gross Stock Variance</td><td style={{ padding: '10px', textAlign: 'right', fontWeight: 'bold' }}>{formatKsh(data.results.grossStockVariance)}</td><td style={{ padding: '10px' }}>Difference</td></tr>
-            <tr style={{ borderBottom: '1px solid #eee' }}><td style={{ padding: '10px' }}>Less: Positive Sales Offset</td><td style={{ padding: '10px', textAlign: 'right' }}>({formatKsh(data.results.salesOffset)})</td><td style={{ padding: '10px' }}>Transferred from sales</td></tr>
-            <tr style={{ backgroundColor: '#fafafa' }}><td style={{ padding: '10px', fontWeight: 'bold' }}>Residual Stock Loss</td><td style={{ padding: '10px', textAlign: 'right', fontWeight: 'bold', color: '#dc3545' }}>{formatKsh(data.results.residualStockLoss)}</td><td style={{ padding: '10px' }}>Added to debt</td></tr>
-          </tbody>
-        </table>
-
-        {/* SECTION 3: SALES */}
-        <h3 style={{ fontSize: '16px', borderBottom: '1px solid #ccc', paddingBottom: '5px', marginTop: '30px' }}>3. Sales Performance Analysis</h3>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px', marginTop: '10px' }}>
-          <thead><tr style={{ backgroundColor: '#f5f5f5', borderBottom: '2px solid #ccc' }}>
-            <th style={{ padding: '10px', textAlign: 'left' }}>Staff</th><th style={{ padding: '10px', textAlign: 'right' }}>Actual</th><th style={{ padding: '10px', textAlign: 'right' }}>System</th><th style={{ padding: '10px', textAlign: 'right' }}>Credit</th><th style={{ padding: '10px', textAlign: 'right' }}>Adj. System</th><th style={{ padding: '10px', textAlign: 'right' }}>Variance</th>
-          </tr></thead>
-          <tbody>
-            {data.staff.map((s, idx) => {
-              const adjSys = s.system - s.credit;
-              const variance = s.actual - adjSys;
-              return (
-                <tr key={idx} style={{ borderBottom: '1px solid #eee' }}>
-                  <td style={{ padding: '10px' }}>{s.name}</td>
-                  <td style={{ padding: '10px', textAlign: 'right' }}>{formatKsh(s.actual)}</td>
-                  <td style={{ padding: '10px', textAlign: 'right' }}>{formatKsh(s.system)}</td>
-                  <td style={{ padding: '10px', textAlign: 'right' }}>{formatKsh(s.credit)}</td>
-                  <td style={{ padding: '10px', textAlign: 'right' }}>{formatKsh(adjSys)}</td>
-                  <td style={{ padding: '10px', textAlign: 'right', color: variance < 0 ? '#dc3545' : '#28a745', fontWeight: 'bold' }}>{formatKsh(variance)}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-
-        {/* SECTION 4: DEBT */}
-        <h3 style={{ fontSize: '16px', borderBottom: '1px solid #ccc', paddingBottom: '5px', marginTop: '30px' }}>4. Branch Account Debt Movement</h3>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px', marginTop: '10px' }}>
-          <thead><tr style={{ backgroundColor: '#f5f5f5', borderBottom: '2px solid #ccc' }}>
-            <th style={{ padding: '10px', textAlign: 'left' }}>Position</th><th style={{ padding: '10px', textAlign: 'left' }}>Date</th><th style={{ padding: '10px', textAlign: 'right' }}>Ksh</th>
-          </tr></thead>
-          <tbody>
-            <tr style={{ borderBottom: '1px solid #eee' }}><td style={{ padding: '10px' }}>Opening Debt</td><td style={{ padding: '10px' }}>{data.openingDebtDate}</td><td style={{ padding: '10px', textAlign: 'right' }}>({formatKsh(data.openingDebt)})</td></tr>
-            <tr style={{ borderBottom: '1px solid #eee' }}><td style={{ padding: '10px' }}>Original Closing Debt</td><td style={{ padding: '10px' }}>{data.closingDebtDate}</td><td style={{ padding: '10px', textAlign: 'right' }}>({formatKsh(data.originalClosingDebt)})</td></tr>
-            <tr style={{ borderBottom: '1px solid #eee' }}><td style={{ padding: '10px' }}>Gross Debt Reduction</td><td style={{ padding: '10px' }}>-</td><td style={{ padding: '10px', textAlign: 'right' }}>{formatKsh(data.debtResults.grossDebtReduction)}</td></tr>
-            <tr style={{ borderBottom: '1px solid #eee' }}><td style={{ padding: '10px' }}>Add: Residual Stock Loss</td><td style={{ padding: '10px' }}>-</td><td style={{ padding: '10px', textAlign: 'right' }}>{formatKsh(data.results.residualStockLoss)}</td></tr>
-            <tr style={{ borderBottom: '1px solid #eee', backgroundColor: '#fafafa' }}><td style={{ padding: '10px', fontWeight: 'bold' }}>Adjusted Closing Debt</td><td style={{ padding: '10px' }}>-</td><td style={{ padding: '10px', textAlign: 'right', fontWeight: 'bold' }}>({formatKsh(data.debtResults.adjustedClosingDebt)})</td></tr>
-            <tr style={{ backgroundColor: '#eef2f5' }}><td style={{ padding: '10px', fontWeight: 'bold' }}>Net Debt Reduction</td><td style={{ padding: '10px' }}>-</td><td style={{ padding: '10px', textAlign: 'right', fontWeight: 'bold', color: '#28a745' }}>{formatKsh(data.debtResults.netDebtReduction)}</td></tr>
-          </tbody>
-        </table>
-
-      </div>
-    );
-  };
-
-  // --- UI ---
+  // --- AUTHENTICATION UI ---
   if (authLoading) return <div style={{ padding: '50px', textAlign: 'center' }}>Loading System...</div>;
 
   if (!session) {
@@ -723,7 +630,7 @@ export default function Home() {
                 <button onClick={handleSave} disabled={isSaving} style={{ flex: 1, padding: '15px', backgroundColor: editingReportId ? '#ff9800' : '#0070f3', color: '#fff', fontSize: '16px', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>
                   {isSaving ? 'Saving...' : editingReportId ? 'Update Draft' : 'Save to Database'}
                 </button>
-                <button onClick={() => setViewingReport(buildLivePreviewData())} style={{ flex: 1, padding: '15px', backgroundColor: '#000', color: '#fff', fontSize: '16px', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>
+                <button onClick={() => setViewingReport(buildReportData(false))} style={{ flex: 1, padding: '15px', backgroundColor: '#000', color: '#fff', fontSize: '16px', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>
                   Preview Report
                 </button>
               </div>
@@ -761,7 +668,7 @@ export default function Home() {
                         </span>
                       </td>
                       <td style={{ padding: '10px', display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
-                        <button onClick={() => setViewingReport(buildHistoryPreviewData(r))} style={{ padding: '6px 12px', backgroundColor: '#0070f3', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>View Report</button>
+                        <button onClick={() => setViewingReport(buildReportData(true, r))} style={{ padding: '6px 12px', backgroundColor: '#0070f3', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>View Report</button>
                         
                         {r.status !== 'Approved' && (
                           <>
@@ -770,7 +677,7 @@ export default function Home() {
                           </>
                         )}
                         
-                        <button onClick={() => handleGenerateHistoryPDF(r, 'save')} style={{ padding: '6px 12px', backgroundColor: '#333', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>Download PDF</button>
+                        <button onClick={() => generatePDF(buildReportData(true, r), 'save')} style={{ padding: '6px 12px', backgroundColor: '#333', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>Download</button>
                       </td>
                     </tr>
                   ))
@@ -783,25 +690,116 @@ export default function Home() {
 
       {/* FULL SCREEN DOCUMENT VIEWER MODAL */}
       {viewingReport && (
-        <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1000, padding: '20px' }}>
-          <div style={{ position: 'relative', width: '100%', maxWidth: '900px', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+        <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: 'rgba(0,0,0,0.8)', display: 'flex', justifyContent: 'center', alignItems: 'flex-start', zIndex: 1000, padding: '40px 20px', overflowY: 'auto' }}>
+          <div style={{ position: 'relative', width: '100%', maxWidth: '850px', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
             
             {/* Top Action Bar */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', marginBottom: '15px' }}>
-               <button onClick={() => setViewingReport(null)} style={{ padding: '10px 20px', backgroundColor: '#fff', color: '#333', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>← Back to List</button>
-               <button onClick={() => {
-                   // We check if viewingReport has an id (it's from history) or not (it's live preview)
-                   if(viewingReport.id) {
-                       handleGenerateHistoryPDF(historicalReports.find(r => r.id === viewingReport.id), 'save');
-                   } else {
-                       generateSmartPDF(viewingReport, 'save');
-                   }
-               }} style={{ padding: '10px 20px', backgroundColor: '#28a745', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>Download Official PDF</button>
+            <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', marginBottom: '15px', position: 'sticky', top: 0, zIndex: 10 }}>
+               <button onClick={() => setViewingReport(null)} style={{ padding: '12px 24px', backgroundColor: '#fff', color: '#000', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', boxShadow: '0 2px 10px rgba(0,0,0,0.3)' }}>← Back</button>
+               <button onClick={() => generatePDF(viewingReport, 'save')} style={{ padding: '12px 24px', backgroundColor: '#28a745', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', boxShadow: '0 2px 10px rgba(0,0,0,0.3)' }}>Download PDF</button>
             </div>
 
-            {/* The Document Itself */}
-            {renderDocumentViewer(viewingReport)}
-            
+            {/* The Document View */}
+            <div style={{ backgroundColor: '#fff', padding: '50px', width: '100%', borderRadius: '4px', boxShadow: '0 10px 30px rgba(0,0,0,0.5)', fontFamily: '"Times New Roman", Times, serif', color: '#000' }}>
+              
+              <div style={{ textAlign: 'center', marginBottom: '30px' }}>
+                <h1 style={{ margin: 0, fontSize: '24px', textTransform: 'uppercase', letterSpacing: '1px' }}>Mediocare Pharmaceuticals Ltd</h1>
+                <h2 style={{ margin: '10px 0', fontSize: '18px', fontWeight: 'normal' }}>{viewingReport.branchName.toUpperCase()} — STOCK CONTROL & FINANCIAL REPORT</h2>
+                <p style={{ margin: 0, fontSize: '14px' }}>Reporting Period: {viewingReport.periodStart} to {viewingReport.periodEnd}</p>
+              </div>
+
+              {/* SECTION 1: EXEC SUMMARY */}
+              <h3 style={{ fontSize: '16px', borderBottom: '2px solid #000', paddingBottom: '5px', marginTop: '30px' }}>1. Executive Summary</h3>
+              <ul style={{ fontSize: '14px', lineHeight: '1.6', paddingLeft: '20px' }}>
+                {viewingReport.results.salesVariance > 0 ? (
+                  <>
+                    <li style={{ marginBottom: '8px' }}>Credit-adjusted sales surplus: <strong>Ksh {formatKsh(viewingReport.results.salesVariance)}</strong> ({viewingReport.results.salesVariancePercentage?.toFixed(2)}%).</li>
+                    <li style={{ marginBottom: '8px' }}>Stock loss: <strong>Ksh {formatKsh(viewingReport.results.grossStockShortage)}</strong> ({viewingReport.results.stockVariancePercentage?.toFixed(2)}%); fully offset by sales surplus.</li>
+                    <li style={{ marginBottom: '8px' }}>Residual surplus after stock-loss offset: <strong>Ksh {formatKsh(viewingReport.results.remainingSalesSurplus)}</strong>.</li>
+                  </>
+                ) : (
+                  <>
+                    <li style={{ marginBottom: '8px' }}>Sales shortage: <strong>Ksh {formatKsh(Math.abs(viewingReport.results.salesVariance))}</strong>. System sales exceeded actual cash.</li>
+                    <li style={{ marginBottom: '8px' }}>Stock loss: <strong>Ksh {formatKsh(viewingReport.results.grossStockShortage)}</strong>. Residual loss to carry forward: <strong>Ksh {formatKsh(viewingReport.results.residualStockLoss)}</strong>.</li>
+                  </>
+                )}
+                <li style={{ marginBottom: '8px' }}>Debt reduced by <strong>Ksh {formatKsh(viewingReport.debtResults.netDebtReduction)}</strong> to <strong>Ksh {formatKsh(viewingReport.debtResults.adjustedClosingDebt)}</strong>.</li>
+              </ul>
+
+              {/* SECTION 2: STOCK */}
+              <h3 style={{ fontSize: '16px', borderBottom: '2px solid #000', paddingBottom: '5px', marginTop: '30px' }}>2. Stock Position and Offset</h3>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px', marginTop: '10px' }}>
+                <thead><tr style={{ backgroundColor: '#333', color: '#fff' }}>
+                  <th style={{ padding: '8px', textAlign: 'left', border: '1px solid #000' }}>Item</th>
+                  <th style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>Ksh</th>
+                  <th style={{ padding: '8px', textAlign: 'left', border: '1px solid #000' }}>Note</th>
+                </tr></thead>
+                <tbody>
+                  <tr><td style={{ padding: '8px', border: '1px solid #000' }}>Stock before stock take</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.openingStock)}</td><td style={{ padding: '8px', border: '1px solid #000' }}>Opening</td></tr>
+                  <tr><td style={{ padding: '8px', border: '1px solid #000' }}>Stock after stock take</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.physicalStock)}</td><td style={{ padding: '8px', border: '1px solid #000' }}>Closing</td></tr>
+                  <tr><td style={{ padding: '8px', border: '1px solid #000', fontWeight: 'bold' }}>Stock loss</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000', fontWeight: 'bold' }}>{formatKsh(viewingReport.results.grossStockVariance)}</td><td style={{ padding: '8px', border: '1px solid #000' }}>{(viewingReport.results.stockVariancePercentage || 0).toFixed(2)}% of opening</td></tr>
+                  <tr><td style={{ padding: '8px', border: '1px solid #000' }}>Sales surplus available</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.results.salesVariance)}</td><td style={{ padding: '8px', border: '1px solid #000' }}>Credit-adjusted</td></tr>
+                  <tr><td style={{ padding: '8px', border: '1px solid #000' }}>Less: applied to stock loss</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>({formatKsh(viewingReport.results.salesOffset)})</td><td style={{ padding: '8px', border: '1px solid #000' }}>Full offset</td></tr>
+                  <tr><td style={{ padding: '8px', border: '1px solid #000', fontWeight: 'bold' }}>Residual Stock Loss</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000', fontWeight: 'bold', color: '#dc3545' }}>{formatKsh(viewingReport.results.residualStockLoss)}</td><td style={{ padding: '8px', border: '1px solid #000' }}>Added to debt</td></tr>
+                </tbody>
+              </table>
+
+              {/* SECTION 3: SALES */}
+              <h3 style={{ fontSize: '16px', borderBottom: '2px solid #000', paddingBottom: '5px', marginTop: '30px' }}>3. Sales Reconciliation (Credit-Adjusted)</h3>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px', marginTop: '10px' }}>
+                <thead><tr style={{ backgroundColor: '#333', color: '#fff' }}>
+                  <th style={{ padding: '8px', textAlign: 'left', border: '1px solid #000' }}>Staff</th>
+                  <th style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>Actual Cash</th>
+                  <th style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>System Sales</th>
+                  <th style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>Credit Sales</th>
+                  <th style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>Adj. System</th>
+                  <th style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>Variance</th>
+                </tr></thead>
+                <tbody>
+                  {viewingReport.staff.map((s, idx) => {
+                    const adjSys = s.system - s.credit;
+                    const variance = s.actual - adjSys;
+                    return (
+                      <tr key={idx}>
+                        <td style={{ padding: '8px', border: '1px solid #000' }}>{s.name}</td>
+                        <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(s.actual)}</td>
+                        <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(s.system)}</td>
+                        <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(s.credit)}</td>
+                        <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(adjSys)}</td>
+                        <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000', color: variance < 0 ? '#dc3545' : '#28a745', fontWeight: 'bold' }}>{formatKsh(variance)}</td>
+                      </tr>
+                    );
+                  })}
+                  <tr style={{ backgroundColor: '#f0f0f0', fontWeight: 'bold' }}>
+                    <td style={{ padding: '8px', border: '1px solid #000' }}>Branch Total</td>
+                    <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.staff.reduce((sum, s) => sum + s.actual, 0))}</td>
+                    <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.staff.reduce((sum, s) => sum + s.system, 0))}</td>
+                    <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.staff.reduce((sum, s) => sum + s.credit, 0))}</td>
+                    <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.staff.reduce((sum, s) => sum + (s.system - s.credit), 0))}</td>
+                    <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000', color: viewingReport.results.salesVariance < 0 ? '#dc3545' : '#28a745' }}>{formatKsh(viewingReport.results.salesVariance)}</td>
+                  </tr>
+                </tbody>
+              </table>
+
+              {/* SECTION 4: DEBT */}
+              <h3 style={{ fontSize: '16px', borderBottom: '2px solid #000', paddingBottom: '5px', marginTop: '30px' }}>4. Branch Account Debt Movement</h3>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px', marginTop: '10px' }}>
+                <thead><tr style={{ backgroundColor: '#333', color: '#fff' }}>
+                  <th style={{ padding: '8px', textAlign: 'left', border: '1px solid #000' }}>Position</th>
+                  <th style={{ padding: '8px', textAlign: 'left', border: '1px solid #000' }}>Date</th>
+                  <th style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>Ksh</th>
+                </tr></thead>
+                <tbody>
+                  <tr><td style={{ padding: '8px', border: '1px solid #000' }}>Opening Debt</td><td style={{ padding: '8px', border: '1px solid #000' }}>{viewingReport.openingDebtDate}</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>({formatKsh(viewingReport.openingDebt)})</td></tr>
+                  <tr><td style={{ padding: '8px', border: '1px solid #000' }}>Original Closing Debt</td><td style={{ padding: '8px', border: '1px solid #000' }}>{viewingReport.closingDebtDate}</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>({formatKsh(viewingReport.originalClosingDebt)})</td></tr>
+                  <tr><td style={{ padding: '8px', border: '1px solid #000' }}>Gross Debt Reduction</td><td style={{ padding: '8px', border: '1px solid #000' }}>-</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.debtResults.grossDebtReduction)}</td></tr>
+                  <tr><td style={{ padding: '8px', border: '1px solid #000' }}>Add: Residual Stock Loss</td><td style={{ padding: '8px', border: '1px solid #000' }}>-</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.results.residualStockLoss)}</td></tr>
+                  <tr style={{ backgroundColor: '#f0f0f0' }}><td style={{ padding: '8px', border: '1px solid #000', fontWeight: 'bold' }}>Adjusted Closing Debt</td><td style={{ padding: '8px', border: '1px solid #000' }}>-</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000', fontWeight: 'bold' }}>({formatKsh(viewingReport.debtResults.adjustedClosingDebt)})</td></tr>
+                  <tr><td style={{ padding: '8px', border: '1px solid #000', fontWeight: 'bold' }}>Net Debt Reduction</td><td style={{ padding: '8px', border: '1px solid #000' }}>-</td><td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000', fontWeight: 'bold', color: '#28a745' }}>{formatKsh(viewingReport.debtResults.netDebtReduction)}</td></tr>
+                </tbody>
+              </table>
+
+            </div>
           </div>
         </div>
       )}
