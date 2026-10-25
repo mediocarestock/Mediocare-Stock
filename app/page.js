@@ -23,15 +23,17 @@ export default function Home() {
   const [isSaving, setIsSaving] = useState(false);
   const [viewingReport, setViewingReport] = useState(null);
 
-  // --- SETTINGS STATE ---
+  // --- SETTINGS & ADMIN STATE ---
   const [deductCredit, setDeductCredit] = useState(true);
   const [addLossToDebt, setAddLossToDebt] = useState(true);
   const [newBranchName, setNewBranchName] = useState('');
+  const [usersList, setUsersList] = useState([]);
 
   // --- DASHBOARD STATE ---
   const [dashboardStats, setDashboardStats] = useState({
     totalBranches: 17, pendingReports: 0, totalStockLoss: 0, totalAdjustedDebt: 0
   });
+  const [chartData, setChartData] = useState({ debtReductions: [], stockLosses: [] });
 
   // --- CREATE / EDIT REPORT STATE ---
   const [editingReportId, setEditingReportId] = useState(null);
@@ -96,6 +98,11 @@ export default function Home() {
     }
   };
 
+  const fetchUsers = async () => {
+    const { data } = await supabase.from('profiles').select('*').order('email');
+    if (data) setUsersList(data);
+  };
+
   useEffect(() => {
     if (session) {
       fetchSettings();
@@ -105,13 +112,15 @@ export default function Home() {
           setDashboardStats(prev => ({ ...prev, totalBranches: data.length }));
         }
       });
+      if (userRole === 'Admin') fetchUsers();
     }
-  }, [session]);
+  }, [session, userRole]);
 
   useEffect(() => {
     if (activeTab === 'dashboard') fetchDashboardData();
     if (activeTab === 'history') fetchHistory();
     if (activeTab === 'consolidated') fetchConsolidated();
+    if (activeTab === 'admin' && userRole === 'Admin') fetchUsers();
   }, [activeTab]);
 
   // --- HELPERS ---
@@ -200,7 +209,6 @@ export default function Home() {
         await supabase.from('sales_records').insert({ report_id: reportId, salesperson_id: spId, actual_sales: num(person.actual), system_sales: num(person.system), credit_sales: num(person.credit) });
       }
 
-      // Save Corrective Actions
       for (const act of actions) {
         if (!act.finding) continue;
         await supabase.from('corrective_actions').insert({
@@ -259,6 +267,12 @@ export default function Home() {
     }
   };
 
+  const handleRoleChange = async (userId, newRole) => {
+    const { error } = await supabase.from('profiles').update({ role: newRole }).eq('id', userId);
+    if (error) alert("Error updating role: " + error.message);
+    else { alert("User role updated!"); fetchUsers(); }
+  };
+
   const resetForm = () => {
     setEditingReportId(null); setSelectedBranch(''); setOpeningStock(''); setPhysicalStock('');
     setOpeningDebt(''); setOriginalClosingDebt(''); setStaff([{ name: '', actual: '', system: '', credit: '' }]);
@@ -291,16 +305,38 @@ export default function Home() {
   // --- FETCH DATA ---
   const fetchDashboardData = async () => {
     setIsLoadingData(true);
-    const { data } = await supabase.from('reports').select(`id, status, branch_actual_sales, branch_system_sales, branch_credit_sales, stock_takes(opening_stock, physical_stock), debt_records(opening_debt, original_closing_debt)`);
+    const { data } = await supabase.from('reports').select(`
+      id, status, branch_id, branches(name), branch_actual_sales, branch_system_sales, branch_credit_sales, 
+      stock_takes(opening_stock, physical_stock), debt_records(opening_debt, original_closing_debt)
+    `);
+    
     if (data) {
       let pending = 0, tStockLoss = 0, tAdjDebt = 0;
+      const branchStats = {};
+
       data.forEach(r => {
         if (r.status !== 'Approved') pending++;
+        
         const adjSys = deductCredit ? (r.branch_system_sales || 0) - (r.branch_credit_sales || 0) : (r.branch_system_sales || 0);
         const res = calculateStockAndSales(r.stock_takes?.[0]?.opening_stock || 0, r.stock_takes?.[0]?.physical_stock || 0, r.branch_actual_sales || 0, adjSys);
         const db = calculateDebt(r.debt_records?.[0]?.opening_debt || 0, r.debt_records?.[0]?.original_closing_debt || 0, addLossToDebt ? res.residualStockLoss : 0);
-        tStockLoss += res.residualStockLoss; tAdjDebt += db.adjustedClosingDebt;
+        
+        tStockLoss += res.residualStockLoss; 
+        tAdjDebt += db.adjustedClosingDebt;
+
+        // Aggregate for charts
+        if (!branchStats[r.branch_id]) {
+          branchStats[r.branch_id] = { name: r.branches?.name || 'Unknown', loss: 0, reduction: 0 };
+        }
+        branchStats[r.branch_id].loss += res.residualStockLoss;
+        branchStats[r.branch_id].reduction += db.netDebtReduction;
       });
+
+      // Prepare chart data (Top 5 worst stock losses, Top 5 best debt reductions)
+      const sortedLosses = Object.values(branchStats).sort((a, b) => b.loss - a.loss).slice(0, 5);
+      const sortedReductions = Object.values(branchStats).sort((a, b) => b.reduction - a.reduction).slice(0, 5);
+
+      setChartData({ debtReductions: sortedReductions, stockLosses: sortedLosses });
       setDashboardStats(prev => ({ ...prev, pendingReports: pending, totalStockLoss: tStockLoss, totalAdjustedDebt: tAdjDebt }));
     }
     setIsLoadingData(false);
@@ -615,6 +651,35 @@ export default function Home() {
     );
   };
 
+  // --- DASHBOARD CHART RENDERER ---
+  const renderDashboardChart = (data, title, color, isLoss = false) => {
+    if (!data || data.length === 0) return <p style={{ color: '#666' }}>No data available.</p>;
+    const maxVal = Math.max(...data.map(d => Math.abs(isLoss ? d.loss : d.reduction)), 1);
+
+    return (
+      <div style={{ padding: '20px', backgroundColor: '#fff', borderRadius: '8px', border: '1px solid #eee', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
+        <h4 style={{ margin: '0 0 20px 0', textAlign: 'center', color: '#333' }}>{title}</h4>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
+          {data.map((d, i) => {
+            const val = isLoss ? d.loss : d.reduction;
+            const pct = (Math.abs(val) / maxVal) * 100;
+            return (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span style={{ width: '80px', fontSize: '13px', fontWeight: 'bold', textAlign: 'right' }}>{d.name}</span>
+                <div style={{ flex: 1, backgroundColor: '#f0f0f0', borderRadius: '4px', height: '24px', position: 'relative' }}>
+                  <div style={{ width: `${Math.max(pct, 2)}%`, backgroundColor: color, height: '100%', borderRadius: '4px' }}></div>
+                </div>
+                <span style={{ width: '100px', fontSize: '13px', fontWeight: 'bold', color: val < 0 ? '#dc3545' : '#333' }}>
+                  Ksh {formatNum(val)}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
 
   // --- AUTHENTICATION UI ---
   if (authLoading) return <div style={{ padding: '50px', textAlign: 'center' }}>Loading System...</div>;
@@ -684,6 +749,11 @@ export default function Home() {
               <h1 style={{ margin: 0, fontSize: '28px', color: '#28a745' }}>Ksh {formatKsh(dashboardStats.totalAdjustedDebt)}</h1>
             </div>
           </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+            {renderDashboardChart(chartData.stockLosses, 'Top 5 Branches by Stock Loss (Ksh)', '#dc3545', true)}
+            {renderDashboardChart(chartData.debtReductions, 'Top 5 Branches by Net Debt Reduction (Ksh)', '#28a745', false)}
+          </div>
         </div>
       )}
 
@@ -692,7 +762,7 @@ export default function Home() {
         <div>
           <h2 style={{ marginBottom: '20px' }}>Admin Management</h2>
           
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginBottom: '20px' }}>
             {/* ACCOUNTING POLICIES */}
             <div style={{ padding: '20px', backgroundColor: '#f9f9f9', borderRadius: '8px', border: '1px solid #ddd' }}>
               <h3 style={{ marginTop: 0 }}>Accounting Policies</h3>
@@ -723,7 +793,7 @@ export default function Home() {
                 <button onClick={handleAddBranch} style={{ padding: '10px 20px', backgroundColor: '#28a745', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>Add Branch</button>
               </div>
               
-              <div style={{ maxHeight: '300px', overflowY: 'auto', border: '1px solid #eee' }}>
+              <div style={{ maxHeight: '250px', overflowY: 'auto', border: '1px solid #eee' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
                   <thead>
                     <tr style={{ backgroundColor: '#f0f0f0', borderBottom: '1px solid #ddd' }}>
@@ -750,6 +820,44 @@ export default function Home() {
                 </table>
               </div>
             </div>
+          </div>
+
+          {/* USER MANAGEMENT */}
+          <div style={{ padding: '20px', backgroundColor: '#f9f9f9', borderRadius: '8px', border: '1px solid #ddd' }}>
+            <h3 style={{ marginTop: 0 }}>User Management</h3>
+            <p style={{ fontSize: '13px', color: '#666' }}>Manage system access levels for registered users.</p>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+              <thead>
+                <tr style={{ backgroundColor: '#f0f0f0', borderBottom: '1px solid #ddd' }}>
+                  <th style={{ padding: '10px', textAlign: 'left' }}>Email</th>
+                  <th style={{ padding: '10px', textAlign: 'left' }}>Role</th>
+                  <th style={{ padding: '10px', textAlign: 'right' }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {usersList.map(u => (
+                  <tr key={u.id} style={{ borderBottom: '1px solid #eee' }}>
+                    <td style={{ padding: '10px' }}>{u.email}</td>
+                    <td style={{ padding: '10px' }}>
+                      <select 
+                        value={u.role || 'Stock Controller'} 
+                        onChange={(e) => handleRoleChange(u.id, e.target.value)}
+                        disabled={u.email === session.user.email}
+                        style={{ padding: '6px', borderRadius: '4px', border: '1px solid #ccc', backgroundColor: u.email === session.user.email ? '#eee' : '#fff' }}
+                      >
+                        <option value="Admin">Admin</option>
+                        <option value="Stock Controller">Stock Controller</option>
+                        <option value="Branch Manager">Branch Manager</option>
+                        <option value="Finance">Finance</option>
+                      </select>
+                    </td>
+                    <td style={{ padding: '10px', textAlign: 'right' }}>
+                      {u.email === session.user.email ? <span style={{ fontSize: '11px', color: '#666' }}>Current User</span> : ''}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
