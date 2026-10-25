@@ -20,8 +20,6 @@ export default function Home() {
   const [activeTab, setActiveTab] = useState('dashboard'); 
   const [branches, setBranches] = useState([]);
   const [isSaving, setIsSaving] = useState(false);
-  
-  // Modals
   const [viewingReport, setViewingReport] = useState(null);
 
   // --- DASHBOARD STATE ---
@@ -30,7 +28,7 @@ export default function Home() {
   });
 
   // --- CREATE / EDIT REPORT STATE ---
-  const [editingReportId, setEditingReportId] = useState(null); // Tracks if we are editing
+  const [editingReportId, setEditingReportId] = useState(null);
   const [selectedBranch, setSelectedBranch] = useState('');
   const [openingStock, setOpeningStock] = useState('');
   const [physicalStock, setPhysicalStock] = useState('');
@@ -82,7 +80,6 @@ export default function Home() {
   const formatKsh = (amount) => new Intl.NumberFormat('en-KE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount);
   const formatNum = (amount) => new Intl.NumberFormat('en-KE', { maximumFractionDigits: 0 }).format(amount);
 
-  // --- CSV UPLOAD ---
   const handleCSVUpload = (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -118,19 +115,11 @@ export default function Home() {
       let reportId = editingReportId;
 
       if (editingReportId) {
-        // UPDATE EXISTING
-        const { error: updateErr } = await supabase.from('reports').update({
-          branch_id: selectedBranch, period_start: periodStart, period_end: periodEnd
-        }).eq('id', editingReportId);
-        if (updateErr) throw updateErr;
-
-        // Delete old child records to replace them
+        await supabase.from('reports').update({ branch_id: selectedBranch, period_start: periodStart, period_end: periodEnd }).eq('id', editingReportId);
         await supabase.from('stock_takes').delete().eq('report_id', editingReportId);
         await supabase.from('debt_records').delete().eq('report_id', editingReportId);
         await supabase.from('sales_records').delete().eq('report_id', editingReportId);
-
       } else {
-        // INSERT NEW
         const { data: reportData, error: reportError } = await supabase.from('reports').insert({ 
           branch_id: selectedBranch, period_start: periodStart, period_end: periodEnd, status: 'Draft' 
         }).select().single();
@@ -138,7 +127,6 @@ export default function Home() {
         reportId = reportData.id;
       }
       
-      // Insert fresh child records
       await supabase.from('stock_takes').insert({ 
         report_id: reportId, opening_stock: num(openingStock), physical_stock: num(physicalStock), stock_date: today, valuation_date: periodStart, physical_count_date: periodEnd 
       });
@@ -174,7 +162,6 @@ export default function Home() {
     setPeriodStart(today); setPeriodEnd(today);
   };
 
-  // --- EDIT REPORT ---
   const handleEditReport = (report) => {
     if (report.status === 'Approved') return alert('Cannot edit an approved report.');
     
@@ -183,17 +170,13 @@ export default function Home() {
     setPeriodStart(report.period_start);
     setPeriodEnd(report.period_end);
     
-    // Stock
     setOpeningStock(report.stock_takes?.[0]?.opening_stock || '');
     setPhysicalStock(report.stock_takes?.[0]?.physical_stock || '');
-    
-    // Debt
     setOpeningDebt(report.debt_records?.[0]?.opening_debt || '');
     setOriginalClosingDebt(report.debt_records?.[0]?.original_closing_debt || '');
     setOpeningDebtDate(report.debt_records?.[0]?.opening_debt_date || today);
     setClosingDebtDate(report.debt_records?.[0]?.closing_debt_date || today);
 
-    // Salespeople
     if (report.sales_records && report.sales_records.length > 0) {
       setStaff(report.sales_records.map(sr => ({
         name: sr.salespeople?.name || '',
@@ -204,16 +187,14 @@ export default function Home() {
     } else {
       setStaff([{ name: '', actual: '', system: '', credit: '' }]);
     }
-
     setActiveTab('create');
   };
 
-  // --- APPROVE REPORT ---
   const handleApprove = async (reportId) => {
-    if(!confirm("Are you sure you want to approve this report? Once approved, it is locked for audit purposes.")) return;
+    if(!confirm("Are you sure you want to approve this report? Once approved, it is locked.")) return;
     const { error } = await supabase.from('reports').update({ status: 'Approved' }).eq('id', reportId);
     if (error) alert("Error approving: " + error.message);
-    else { alert("Report Approved successfully."); fetchHistory(); }
+    else { alert("Report Approved."); fetchHistory(); }
   };
 
   // --- FETCH DATA ---
@@ -222,7 +203,6 @@ export default function Home() {
     const { data } = await supabase.from('reports').select(`
       id, status, stock_takes(opening_stock, physical_stock), debt_records(opening_debt, original_closing_debt), sales_records(actual_sales, system_sales, credit_sales)
     `);
-
     if (data) {
       let pending = 0, tStockLoss = 0, tAdjDebt = 0;
       data.forEach(r => {
@@ -246,14 +226,30 @@ export default function Home() {
 
   const fetchHistory = async () => {
     setIsLoadingData(true);
-    // We fetch ALL related data now so we can display it in the View modal and Edit form
-    const { data } = await supabase.from('reports').select(`
-      id, branch_id, period_start, period_end, status, created_at, branches (name),
-      stock_takes(opening_stock, physical_stock, opening_debt_date, closing_debt_date),
-      debt_records(opening_debt, original_closing_debt, opening_debt_date, closing_debt_date),
-      sales_records(actual_sales, system_sales, credit_sales, salespeople(name))
-    `).order('created_at', { ascending: false });
-    setHistoricalReports(data || []);
+    // Using simple query then fetching nested data to prevent Supabase join errors
+    const { data: reports, error } = await supabase.from('reports').select('*, branches(name)').order('created_at', { ascending: false });
+    
+    if (error) {
+      console.error("History fetch error:", error);
+      alert("Error loading history: " + error.message);
+      setIsLoadingData(false);
+      return;
+    }
+
+    const fullReports = [];
+    for (const r of reports) {
+      const { data: st } = await supabase.from('stock_takes').select('*').eq('report_id', r.id);
+      const { data: dr } = await supabase.from('debt_records').select('*').eq('report_id', r.id);
+      const { data: sr } = await supabase.from('sales_records').select('*, salespeople(name)').eq('report_id', r.id);
+      
+      fullReports.push({
+        ...r,
+        stock_takes: st || [],
+        debt_records: dr || [],
+        sales_records: sr || []
+      });
+    }
+    setHistoricalReports(fullReports);
     setIsLoadingData(false);
   };
 
@@ -289,39 +285,177 @@ export default function Home() {
     setIsLoadingData(false);
   };
 
-  // --- PDF GENERATION ---
-  const generateBranchPDF = (data, action = 'save') => {
+  // --- SMART PDF ENGINE (MATCHING SAMPLES) ---
+  const drawBarChart = (doc, startX, startY, width, height, data, title) => {
+    let maxVal = 0;
+    data.forEach(d => {
+      if (d.val1 > maxVal) maxVal = d.val1;
+      if (d.val2 && d.val2 > maxVal) maxVal = d.val2;
+    });
+    maxVal = maxVal * 1.2; // 20% padding
+
+    doc.setFontSize(9); doc.setFont('helvetica', 'bold');
+    doc.text(title, startX + width / 2, startY - 5, { align: 'center' });
+    doc.setDrawColor(150); doc.setLineWidth(0.5);
+    doc.line(startX, startY, startX, startY + height); doc.line(startX, startY + height, startX + width, startY + height);
+
+    const barGroupWidth = width / data.length;
+    const barWidth = (barGroupWidth * 0.6) / (data[0].val2 ? 2 : 1);
+
+    data.forEach((d, i) => {
+      const groupX = startX + (i * barGroupWidth) + (barGroupWidth * 0.2);
+      
+      // Bar 1
+      const h1 = (d.val1 / maxVal) * height;
+      doc.setFillColor(50, 50, 50);
+      doc.rect(groupX, startY + height - h1, barWidth, h1, 'F');
+      doc.setFontSize(6); doc.setTextColor(0);
+      doc.text(formatNum(d.val1), groupX + barWidth/2, startY + height - h1 - 2, { align: 'center' });
+
+      // Bar 2 (If exists)
+      if (d.val2) {
+        const h2 = (d.val2 / maxVal) * height;
+        doc.setFillColor(200, 200, 200);
+        doc.rect(groupX + barWidth + 1, startY + height - h2, barWidth, h2, 'F');
+        doc.text(formatNum(d.val2), groupX + barWidth + 1 + barWidth/2, startY + height - h2 - 2, { align: 'center' });
+      }
+
+      doc.setFontSize(7); doc.text(d.label.substring(0, 8), groupX + barWidth, startY + height + 4, { align: 'center' });
+    });
+  };
+
+  const generateSmartPDF = (data, action = 'save') => {
     const doc = new jsPDF();
     const pageWidth = doc.internal.pageSize.getWidth();
     
-    doc.setFontSize(16); doc.setFont('helvetica', 'bold');
+    // HEADER
+    doc.setFontSize(16); doc.setFont('helvetica', 'bold'); doc.setTextColor(0);
     doc.text('MEDIOCARE PHARMACEUTICALS LTD', pageWidth / 2, 20, { align: 'center' });
     doc.setFontSize(12);
-    doc.text(`${data.branchName.toUpperCase()} — FINANCIAL REPORT`, pageWidth / 2, 28, { align: 'center' });
-    
-    autoTable(doc, {
-      startY: 40,
-      head: [['Metric', 'Amount (Ksh)']],
-      body: [
-        ['Stock Variance', formatKsh(data.results.grossStockVariance)],
-        ['Sales Variance', formatKsh(data.results.salesVariance)],
-        ['Residual Stock Loss', formatKsh(data.results.residualStockLoss)],
-        ['Adjusted Closing Debt', formatKsh(data.debtResults.adjustedClosingDebt)],
-        ['Net Debt Reduction', formatKsh(data.debtResults.netDebtReduction)],
-      ],
-      theme: 'grid', headStyles: { fillColor: [44, 62, 80] }
+    doc.text(`${data.branchName.toUpperCase()} — STOCK CONTROL & FINANCIAL REPORT`, pageWidth / 2, 28, { align: 'center' });
+    doc.setFontSize(9); doc.setFont('helvetica', 'normal');
+    doc.text(`Period: ${data.periodStart} to ${data.periodEnd}`, pageWidth / 2, 34, { align: 'center' });
+
+    // --- NARRATIVE GENERATOR ---
+    let narrative = [];
+    const totalVar = data.results.salesVariance;
+    if (totalVar > 0) {
+      // Find top drivers
+      const sortedStaff = [...data.staff].sort((a, b) => (b.actual - (b.system - b.credit)) - (a.actual - (a.system - a.credit)));
+      const topDriver1 = sortedStaff[0] ? `${sortedStaff[0].name} (${Math.round(((sortedStaff[0].actual - (sortedStaff[0].system - sortedStaff[0].credit)) / totalVar) * 100)}%)` : '';
+      const topDriver2 = sortedStaff[1] ? `${sortedStaff[1].name} (${Math.round(((sortedStaff[1].actual - (sortedStaff[1].system - sortedStaff[1].credit)) / totalVar) * 100)}%)` : '';
+      
+      narrative.push(`• Positive Sales Variance: Ksh ${formatKsh(totalVar)} (Unrecorded cash/transactions).`);
+      if(topDriver1) narrative.push(`• Variance Drivers: ${topDriver1}, ${topDriver2}.`);
+      narrative.push(`• The positive sales variance was applied to offset the stock shortage, leaving a residual stock loss of Ksh ${formatKsh(data.results.residualStockLoss)}.`);
+    } else if (totalVar < 0) {
+      narrative.push(`• Negative Sales Variance: Ksh ${formatKsh(Math.abs(totalVar))} (System sales exceeded actual cash). Requires investigation.`);
+    }
+
+    if (data.debtResults.netDebtReduction > 0) {
+      narrative.push(`• Debt reduced by Ksh ${formatKsh(data.debtResults.netDebtReduction)} (${data.debtResults.debtReductionPercentage?.toFixed(2)}%) to Ksh ${formatKsh(data.debtResults.adjustedClosingDebt)}.`);
+    } else {
+      narrative.push(`• ADVERSE: Debt increased by Ksh ${formatKsh(Math.abs(data.debtResults.netDebtReduction))}.`);
+    }
+
+    // 1. Executive Summary
+    doc.setFontSize(11); doc.setFont('helvetica', 'bold');
+    doc.text('1. Executive Summary', 14, 45);
+    doc.setFontSize(9); doc.setFont('helvetica', 'normal');
+    let summaryY = 52;
+    narrative.forEach(text => {
+      const splitText = doc.splitTextToSize(text, pageWidth - 28);
+      doc.text(splitText, 14, summaryY); summaryY += (splitText.length * 5) + 2;
     });
 
+    // 2. Stock Position
+    doc.setFontSize(11); doc.setFont('helvetica', 'bold');
+    doc.text('2. Stock Position & Offset', 14, summaryY + 5);
+    autoTable(doc, {
+      startY: summaryY + 10,
+      head: [['Item', 'Ksh', 'Remarks']],
+      body: [
+        ['Stock before stock take', formatKsh(data.openingStock), 'Opening'],
+        ['Stock after stock take', formatKsh(data.physicalStock), 'Physical'],
+        ['Gross Stock Variance', formatKsh(data.results.grossStockVariance), 'Difference'],
+        ['Less: Positive Sales Offset', `(${formatKsh(data.results.salesOffset)})`, 'Transferred from sales'],
+        ['Residual Stock Loss', formatKsh(data.results.residualStockLoss), 'Added to debt'],
+      ],
+      theme: 'grid', headStyles: { fillColor: [44, 62, 80] }, styles: { fontSize: 8 }
+    });
+
+    // 3. Sales Performance
+    doc.setFontSize(11); doc.setFont('helvetica', 'bold');
+    doc.text('3. Sales Performance Analysis', 14, doc.lastAutoTable.finalY + 10);
+    const salesBody = data.staff.map(s => {
+      const adjSys = s.system - s.credit;
+      return [s.name, formatKsh(s.actual), formatKsh(s.system), formatKsh(s.credit), formatKsh(adjSys), formatKsh(s.actual - adjSys)];
+    });
+    autoTable(doc, {
+      startY: doc.lastAutoTable.finalY + 15,
+      head: [['Staff', 'Actual', 'System', 'Credit', 'Adj. System', 'Variance']],
+      body: salesBody,
+      theme: 'striped', headStyles: { fillColor: [44, 62, 80] }, styles: { fontSize: 8 },
+      didParseCell: function (data) {
+        if (data.section === 'body' && data.column.index === 5 && data.cell.text[0].includes('-')) {
+          data.cell.styles.textColor = [192, 57, 43];
+        }
+      }
+    });
+
+    // 4. Debt Movement
+    doc.setFontSize(11); doc.setFont('helvetica', 'bold');
+    doc.text('4. Branch Account Debt Movement', 14, doc.lastAutoTable.finalY + 10);
+    autoTable(doc, {
+      startY: doc.lastAutoTable.finalY + 15,
+      head: [['Position', 'Date', 'Ksh']],
+      body: [
+        ['Opening Debt', data.openingDebtDate, `(${formatKsh(data.openingDebt)})`],
+        ['Original Closing Debt', data.closingDebtDate, `(${formatKsh(data.originalClosingDebt)})`],
+        ['Gross Debt Reduction', '-', formatKsh(data.debtResults.grossDebtReduction)],
+        ['Add: Residual Stock Loss', '-', formatKsh(data.results.residualStockLoss)],
+        ['Adjusted Closing Debt', '-', `(${formatKsh(data.debtResults.adjustedClosingDebt)})`],
+        ['Net Debt Reduction', '-', formatKsh(data.debtResults.netDebtReduction)],
+      ],
+      theme: 'grid', headStyles: { fillColor: [44, 62, 80] }, styles: { fontSize: 8 }
+    });
+
+    // 5. Graphs
+    doc.addPage();
+    doc.setFontSize(11); doc.setFont('helvetica', 'bold'); doc.text('5. Graphical Analysis', 14, 20);
+    
+    // Chart 1: Individual Sales
+    const chartData = data.staff.slice(0, 6).map(s => ({ label: s.name, val1: s.actual, val2: s.system - s.credit }));
+    if(chartData.length > 0) drawBarChart(doc, 20, 40, 170, 60, chartData, 'Actual vs Adjusted System Sales');
+
+    // Chart 2: Stock Reconciliation
+    drawBarChart(doc, 20, 130, 80, 50, [
+      { label: 'Stock Loss', val1: data.results.grossStockShortage },
+      { label: 'Sales Offset', val1: data.results.salesOffset },
+      { label: 'Residual', val1: data.results.residualStockLoss }
+    ], 'Stock Loss Reconciliation');
+
+    // Chart 3: Debt
+    drawBarChart(doc, 110, 130, 80, 50, [
+      { label: 'Opening', val1: data.openingDebt },
+      { label: 'Adj Close', val1: data.debtResults.adjustedClosingDebt }
+    ], 'Debt Movement');
+
     if (action === 'view') {
-      window.open(doc.output('bloburl'), '_blank'); // Open in new tab
+      window.open(doc.output('bloburl'), '_blank');
     } else {
-      doc.save(`${data.branchName}_Report.pdf`); // Download
+      doc.save(`${data.branchName}_Report.pdf`);
     }
   };
 
   const handleGenerateLivePDF = (action) => {
     if(!selectedBranch) return alert("Select a branch first");
-    generateBranchPDF({ branchName, results: stockAndSalesResults, debtResults }, action);
+    generateSmartPDF({ 
+      branchName, periodStart, periodEnd, openingStock: num(openingStock), physicalStock: num(physicalStock),
+      openingDebt: num(openingDebt), originalClosingDebt: num(originalClosingDebt), 
+      openingDebtDate, closingDebtDate, results: stockAndSalesResults, debtResults, 
+      staff: staff.map(s => ({ name: s.name, actual: num(s.actual), system: num(s.system), credit: num(s.credit) }))
+    }, action);
   };
 
   const handleGenerateHistoryPDF = (report, action) => {
@@ -340,10 +474,17 @@ export default function Home() {
     const results = calculateStockAndSales(oStk, pStk, tAct, tSys - tCre);
     const debtResults = calculateDebt(oDebt, cDebt, results.residualStockLoss);
 
-    generateBranchPDF({ branchName: report.branches?.name || 'Unknown', results, debtResults }, action);
+    generateSmartPDF({ 
+      branchName: report.branches?.name || 'Unknown', 
+      periodStart: report.period_start, periodEnd: report.period_end,
+      openingStock: oStk, physicalStock: pStk, openingDebt: oDebt, originalClosingDebt: cDebt,
+      openingDebtDate: report.debt_records?.[0]?.opening_debt_date || 'N/A', 
+      closingDebtDate: report.debt_records?.[0]?.closing_debt_date || 'N/A',
+      results, debtResults, staff: staffData 
+    }, action);
   };
 
-  // --- AUTHENTICATION UI ---
+  // --- UI (Same as before) ---
   if (authLoading) return <div style={{ padding: '50px', textAlign: 'center' }}>Loading System...</div>;
 
   if (!session) {
@@ -368,11 +509,9 @@ export default function Home() {
     );
   }
 
-  // --- MAIN APP UI ---
   return (
     <main style={{ maxWidth: '1200px', margin: '40px auto', fontFamily: 'system-ui', padding: '0 20px' }}>
       
-      {/* HEADER */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '2px solid #333', paddingBottom: '10px', marginBottom: '20px' }}>
         <div>
           <h1 style={{ margin: 0 }}>Mediocare System</h1>
@@ -387,7 +526,6 @@ export default function Home() {
         </div>
       </div>
 
-      {/* DASHBOARD TAB */}
       {activeTab === 'dashboard' && (
         <div>
           <h2 style={{ marginBottom: '20px' }}>Company Overview</h2>
@@ -397,22 +535,21 @@ export default function Home() {
               <h1 style={{ margin: 0, fontSize: '32px' }}>{dashboardStats.totalBranches}</h1>
             </div>
             <div style={{ padding: '20px', backgroundColor: '#fff3cd', borderRadius: '8px', borderLeft: '5px solid #ff9800' }}>
-              <p style={{ margin: '0 0 10px 0', fontSize: '14px', color: '#666', fontWeight: 'bold' }}>Reports Pending Approval</p>
+              <p style={{ margin: '0 0 10px 0', fontSize: '14px', color: '#666', fontWeight: 'bold' }}>Pending Reports</p>
               <h1 style={{ margin: 0, fontSize: '32px', color: '#ff9800' }}>{dashboardStats.pendingReports}</h1>
             </div>
             <div style={{ padding: '20px', backgroundColor: '#f8d7da', borderRadius: '8px', borderLeft: '5px solid #dc3545' }}>
-              <p style={{ margin: '0 0 10px 0', fontSize: '14px', color: '#666', fontWeight: 'bold' }}>Total Residual Stock Loss</p>
+              <p style={{ margin: '0 0 10px 0', fontSize: '14px', color: '#666', fontWeight: 'bold' }}>Total Stock Loss</p>
               <h1 style={{ margin: 0, fontSize: '28px', color: '#dc3545' }}>Ksh {formatKsh(dashboardStats.totalStockLoss)}</h1>
             </div>
             <div style={{ padding: '20px', backgroundColor: '#d4edda', borderRadius: '8px', borderLeft: '5px solid #28a745' }}>
-              <p style={{ margin: '0 0 10px 0', fontSize: '14px', color: '#666', fontWeight: 'bold' }}>Total Adjusted Closing Debt</p>
+              <p style={{ margin: '0 0 10px 0', fontSize: '14px', color: '#666', fontWeight: 'bold' }}>Total Adjusted Debt</p>
               <h1 style={{ margin: 0, fontSize: '28px', color: '#28a745' }}>Ksh {formatKsh(dashboardStats.totalAdjustedDebt)}</h1>
             </div>
           </div>
         </div>
       )}
 
-      {/* CREATE / EDIT TAB */}
       {activeTab === 'create' && (
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
@@ -520,7 +657,6 @@ export default function Home() {
         </div>
       )}
 
-      {/* HISTORY TAB */}
       {activeTab === 'history' && (
         <div style={{ padding: '20px', backgroundColor: '#f9f9f9', borderRadius: '8px', border: '1px solid #ddd' }}>
           <h2 style={{ marginTop: 0 }}>Saved Reports</h2>
@@ -536,37 +672,40 @@ export default function Home() {
                 </tr>
               </thead>
               <tbody>
-                {historicalReports.map(r => (
-                  <tr key={r.id} style={{ borderBottom: '1px solid #eee' }}>
-                    <td style={{ padding: '10px' }}>{new Date(r.created_at).toLocaleDateString()}</td>
-                    <td style={{ padding: '10px', fontWeight: 'bold' }}>{r.branches?.name}</td>
-                    <td style={{ padding: '10px' }}>{r.period_start} to {r.period_end}</td>
-                    <td style={{ padding: '10px' }}>
-                      <span style={{ padding: '4px 8px', backgroundColor: r.status === 'Approved' ? '#28a745' : '#ff9800', color: '#fff', borderRadius: '12px', fontSize: '12px', fontWeight: 'bold' }}>
-                        {r.status}
-                      </span>
-                    </td>
-                    <td style={{ padding: '10px', display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
-                      <button onClick={() => setViewingReport(r)} style={{ padding: '6px 12px', backgroundColor: '#0070f3', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>View Data</button>
-                      
-                      {r.status !== 'Approved' && (
-                        <>
-                          <button onClick={() => handleEditReport(r)} style={{ padding: '6px 12px', backgroundColor: '#ff9800', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>Edit</button>
-                          <button onClick={() => handleApprove(r.id)} style={{ padding: '6px 12px', backgroundColor: '#28a745', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>Approve</button>
-                        </>
-                      )}
-                      
-                      <button onClick={() => handleGenerateHistoryPDF(r, 'view')} style={{ padding: '6px 12px', backgroundColor: '#333', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>Open PDF</button>
-                    </td>
-                  </tr>
-                ))}
+                {historicalReports.length === 0 ? (
+                  <tr><td colSpan="5" style={{ padding: '20px', textAlign: 'center' }}>No reports found. Create one first!</td></tr>
+                ) : (
+                  historicalReports.map(r => (
+                    <tr key={r.id} style={{ borderBottom: '1px solid #eee' }}>
+                      <td style={{ padding: '10px' }}>{new Date(r.created_at).toLocaleDateString()}</td>
+                      <td style={{ padding: '10px', fontWeight: 'bold' }}>{r.branches?.name}</td>
+                      <td style={{ padding: '10px' }}>{r.period_start} to {r.period_end}</td>
+                      <td style={{ padding: '10px' }}>
+                        <span style={{ padding: '4px 8px', backgroundColor: r.status === 'Approved' ? '#28a745' : '#ff9800', color: '#fff', borderRadius: '12px', fontSize: '12px', fontWeight: 'bold' }}>
+                          {r.status}
+                        </span>
+                      </td>
+                      <td style={{ padding: '10px', display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
+                        <button onClick={() => setViewingReport(r)} style={{ padding: '6px 12px', backgroundColor: '#0070f3', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>View Data</button>
+                        
+                        {r.status !== 'Approved' && (
+                          <>
+                            <button onClick={() => handleEditReport(r)} style={{ padding: '6px 12px', backgroundColor: '#ff9800', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>Edit</button>
+                            <button onClick={() => handleApprove(r.id)} style={{ padding: '6px 12px', backgroundColor: '#28a745', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>Approve</button>
+                          </>
+                        )}
+                        
+                        <button onClick={() => handleGenerateHistoryPDF(r, 'view')} style={{ padding: '6px 12px', backgroundColor: '#333', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>Open PDF</button>
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           )}
         </div>
       )}
 
-      {/* VIEW REPORT MODAL */}
       {viewingReport && (
         <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1000 }}>
           <div style={{ backgroundColor: '#fff', padding: '30px', borderRadius: '8px', width: '90%', maxWidth: '800px', maxHeight: '90%', overflowY: 'auto' }}>
@@ -618,6 +757,45 @@ export default function Home() {
         </div>
       )}
 
+      {activeTab === 'consolidated' && (
+        <div style={{ padding: '20px', backgroundColor: '#f9f9f9', borderRadius: '8px', border: '1px solid #ddd' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+            <h2 style={{ margin: 0 }}>Company-Wide Consolidated Report</h2>
+            <button onClick={() => alert("Consolidated PDF generation is coming in the next step!")} style={{ padding: '10px 20px', backgroundColor: '#000', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>Download Master PDF</button>
+          </div>
+          
+          {isLoadingData ? <p>Aggregating data...</p> : (
+            <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '13px' }}>
+              <thead>
+                <tr style={{ borderBottom: '2px solid #ddd', backgroundColor: '#eef2f5' }}>
+                  <th style={{ padding: '10px' }}>Branch</th>
+                  <th style={{ padding: '10px' }}>Status</th>
+                  <th style={{ padding: '10px' }}>Period</th>
+                  <th style={{ padding: '10px' }}>Opening Debt</th>
+                  <th style={{ padding: '10px' }}>Adj. Closing Debt</th>
+                  <th style={{ padding: '10px' }}>Net Debt Reduction</th>
+                  <th style={{ padding: '10px' }}>Stock Loss</th>
+                  <th style={{ padding: '10px' }}>Sales Var.</th>
+                </tr>
+              </thead>
+              <tbody>
+                {consolidatedData.map((d, i) => (
+                  <tr key={i} style={{ borderBottom: '1px solid #eee' }}>
+                    <td style={{ padding: '10px', fontWeight: 'bold' }}>{d.name}</td>
+                    <td style={{ padding: '10px' }}>{d.status}</td>
+                    <td style={{ padding: '10px' }}>{d.period}</td>
+                    <td style={{ padding: '10px' }}>{formatKsh(d.openingDebt)}</td>
+                    <td style={{ padding: '10px' }}>{formatKsh(d.adjClosingDebt)}</td>
+                    <td style={{ padding: '10px', color: d.netReduction > 0 ? 'green' : 'red' }}>{formatKsh(d.netReduction)}</td>
+                    <td style={{ padding: '10px' }}>{formatKsh(d.stockLoss)}</td>
+                    <td style={{ padding: '10px' }}>{formatKsh(d.salesVariance)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
     </main>
   );
 }
