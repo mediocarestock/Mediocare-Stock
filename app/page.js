@@ -20,7 +20,7 @@ export default function Home() {
   const [openingDebt, setOpeningDebt] = useState('');
   const [originalClosingDebt, setOriginalClosingDebt] = useState('');
 
-  // Form State - Dates (Defaulting to today)
+  // Form State - Dates
   const today = new Date().toISOString().split('T')[0];
   const [periodStart, setPeriodStart] = useState(today);
   const [periodEnd, setPeriodEnd] = useState(today);
@@ -28,6 +28,10 @@ export default function Home() {
   const [physicalCountDate, setPhysicalCountDate] = useState(today);
   const [openingDebtDate, setOpeningDebtDate] = useState(today);
   const [closingDebtDate, setClosingDebtDate] = useState(today);
+  
+  // Reviewers
+  const [preparedBy, setPreparedBy] = useState('');
+  const [reviewedBy, setReviewedBy] = useState('');
 
   useEffect(() => {
     async function getBranches() {
@@ -49,121 +53,180 @@ export default function Home() {
   );
 
   const formatKsh = (amount) => new Intl.NumberFormat('en-KE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount);
+  const formatPct = (pct) => pct === null ? 'N/A' : `${pct.toFixed(2)}%`;
   const branchName = branches.find(b => b.id === selectedBranch)?.name || '';
 
-  // --- SAVE TO DATABASE ---
   const handleSave = async () => {
+    // ... (keep the same save logic as before)
     if (!selectedBranch) return alert('Please select a branch first.');
     setIsSaving(true);
-
     try {
-      // 1. Create Report
-      const { data: reportData, error: reportError } = await supabase
-        .from('reports')
-        .insert({ 
-          branch_id: selectedBranch, 
-          period_start: today, 
-          period_end: today, 
-          period_start_date: periodStart,
-          period_end_date: periodEnd,
-          status: 'Draft' 
-        })
-        .select().single();
-
+      const { data: reportData, error: reportError } = await supabase.from('reports').insert({ branch_id: selectedBranch, period_start: today, period_end: today, period_start_date: periodStart, period_end_date: periodEnd, status: 'Draft' }).select().single();
       if (reportError) throw reportError;
       const reportId = reportData.id;
-
-      // 2. Save Stock
-      await supabase.from('stock_takes').insert({
-        report_id: reportId, 
-        opening_stock: num(openingStock), 
-        physical_stock: num(physicalStock), 
-        stock_date: today,
-        valuation_date: valuationDate,
-        physical_count_date: physicalCountDate
-      });
-
-      // 3. Save Debt
-      await supabase.from('debt_records').insert({
-        report_id: reportId, 
-        opening_debt: num(openingDebt), 
-        original_closing_debt: num(originalClosingDebt), 
-        residual_stock_loss_added: stockAndSalesResults.residualStockLoss,
-        opening_debt_date: openingDebtDate,
-        closing_debt_date: closingDebtDate
-      });
-
-      // 4. Save Branch Sales Aggregate
+      await supabase.from('stock_takes').insert({ report_id: reportId, opening_stock: num(openingStock), physical_stock: num(physicalStock), stock_date: today, valuation_date: valuationDate, physical_count_date: physicalCountDate });
+      await supabase.from('debt_records').insert({ report_id: reportId, opening_debt: num(openingDebt), original_closing_debt: num(originalClosingDebt), residual_stock_loss_added: stockAndSalesResults.residualStockLoss, opening_debt_date: openingDebtDate, closing_debt_date: closingDebtDate });
       const { data: spData } = await supabase.from('salespeople').select('id').eq('branch_id', selectedBranch).limit(1);
       let spId = spData?.[0]?.id;
-      
       if (!spId) {
         const { data: newSp } = await supabase.from('salespeople').insert({ branch_id: selectedBranch, name: 'Branch Aggregate' }).select().single();
         spId = newSp.id;
       }
-
-      await supabase.from('sales_records').insert({
-        report_id: reportId, salesperson_id: spId, actual_sales: num(actualSales), system_sales: num(systemSales), credit_sales: num(creditSales)
-      });
-
-      alert('Report and specific dates saved to database successfully!');
-    } catch (err) {
-      alert('Error saving: ' + err.message);
-    } finally {
-      setIsSaving(false);
-    }
+      await supabase.from('sales_records').insert({ report_id: reportId, salesperson_id: spId, actual_sales: num(actualSales), system_sales: num(systemSales), credit_sales: num(creditSales) });
+      alert('Report saved successfully!');
+    } catch (err) { alert('Error saving: ' + err.message); } finally { setIsSaving(false); }
   };
 
-  // --- GENERATE PDF ---
   const generatePDF = () => {
     if (!selectedBranch) return alert('Please select a branch first.');
     
     const doc = new jsPDF();
     const pageWidth = doc.internal.pageSize.getWidth();
-    
-    // Header
-    doc.setFontSize(18);
-    doc.text('MEDIOCARE PHARMACEUTICALS LTD', pageWidth / 2, 20, { align: 'center' });
-    doc.setFontSize(14);
-    doc.text(`${branchName} — STOCK CONTROL & FINANCIAL REPORT`, pageWidth / 2, 30, { align: 'center' });
-    doc.setFontSize(10);
-    doc.text(`Reporting Period: ${periodStart} to ${periodEnd}`, pageWidth / 2, 38, { align: 'center' });
+    const pageHeight = doc.internal.pageSize.getHeight();
 
-    // Section 1: Key Dates
+    // --- HEADER ---
+    doc.setFontSize(18);
+    doc.setFont('helvetica', 'bold');
+    doc.text('MEDIOCARE PHARMACEUTICALS LTD', pageWidth / 2, 20, { align: 'center' });
+    
+    doc.setFontSize(14);
+    doc.text(`${branchName.toUpperCase()} — STOCK CONTROL & FINANCIAL REPORT`, pageWidth / 2, 30, { align: 'center' });
+    
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.text(`Reporting Period: ${periodStart} to ${periodEnd} | Currency: Kenya Shillings (KSh)`, pageWidth / 2, 38, { align: 'center' });
+
+    // --- SECTION 1: EXECUTIVE SUMMARY ---
     doc.setFontSize(12);
-    doc.text('1. Key Reporting Dates', 14, 50);
+    doc.setFont('helvetica', 'bold');
+    doc.text('1. Executive Summary', 14, 50);
     
     autoTable(doc, {
       startY: 55,
-      head: [['Record', 'Date']],
+      head: [['Key Metric', 'Amount (KSh)']],
       body: [
-        ['Stock Valuation Date', valuationDate],
-        ['Physical Count Date', physicalCountDate],
-        ['Opening Debt Date', openingDebtDate],
-        ['Closing Debt Date', closingDebtDate],
-      ],
-      theme: 'grid',
-      headStyles: { fillColor: [41, 128, 185] }
-    });
-
-    // Section 2: Executive Summary
-    doc.text('2. Financial Summary', 14, doc.lastAutoTable.finalY + 15);
-    
-    autoTable(doc, {
-      startY: doc.lastAutoTable.finalY + 20,
-      head: [['Metric', 'Value (KSh)']],
-      body: [
-        ['Gross Stock Variance', formatKsh(stockAndSalesResults.grossStockVariance)],
+        ['Actual Sales', formatKsh(num(actualSales))],
+        ['Adjusted System Sales', formatKsh(adjustedSystemSales)],
         ['Sales Variance', formatKsh(stockAndSalesResults.salesVariance)],
+        ['Gross Stock Variance', formatKsh(stockAndSalesResults.grossStockVariance)],
         ['Residual Stock Loss', formatKsh(stockAndSalesResults.residualStockLoss)],
+        ['Original Closing Debt', formatKsh(num(originalClosingDebt))],
         ['Adjusted Closing Debt', formatKsh(debtResults.adjustedClosingDebt)],
         ['Net Debt Reduction', formatKsh(debtResults.netDebtReduction)],
       ],
       theme: 'grid',
-      headStyles: { fillColor: [41, 128, 185] }
+      headStyles: { fillColor: [34, 49, 63] },
+      styles: { fontSize: 10 }
     });
 
-    // Save the PDF
+    // --- SECTION 2: STOCK VALUATION ANALYSIS ---
+    let currentY = doc.lastAutoTable.finalY + 15;
+    doc.setFontSize(12);
+    doc.setFont('helvetica', 'bold');
+    doc.text('2. Stock Valuation Analysis', 14, currentY);
+    
+    autoTable(doc, {
+      startY: currentY + 5,
+      head: [['Description', 'Date', 'Amount (KSh)']],
+      body: [
+        ['Book Stock before Stock Take', valuationDate, formatKsh(num(openingStock))],
+        ['Physical Stock after Stock Take', physicalCountDate, formatKsh(num(physicalStock))],
+        ['Gross Stock Variance', '-', formatKsh(stockAndSalesResults.grossStockVariance)],
+        ['Stock Variance Percentage', '-', formatPct(stockAndSalesResults.stockVariancePercentage)],
+      ],
+      theme: 'striped',
+      headStyles: { fillColor: [41, 128, 185] },
+      styles: { fontSize: 10 }
+    });
+
+    // --- SECTION 3: SALES PERFORMANCE ---
+    currentY = doc.lastAutoTable.finalY + 15;
+    doc.setFontSize(12);
+    doc.text('3. Sales Performance Analysis', 14, currentY);
+
+    autoTable(doc, {
+      startY: currentY + 5,
+      head: [['Description', 'Amount (KSh)']],
+      body: [
+        ['Actual Sales', formatKsh(num(actualSales))],
+        ['System Sales (Original)', formatKsh(num(systemSales))],
+        ['Less: Credit Sales Included', `(${formatKsh(num(creditSales))})`],
+        ['Adjusted System Sales', formatKsh(adjustedSystemSales)],
+        ['Sales Variance', formatKsh(stockAndSalesResults.salesVariance)],
+        ['Sales Variance Percentage', formatPct(stockAndSalesResults.salesVariancePercentage)],
+      ],
+      theme: 'striped',
+      headStyles: { fillColor: [41, 128, 185] },
+      styles: { fontSize: 10 }
+    });
+
+    // --- SECTION 4: RECONCILIATION ---
+    currentY = doc.lastAutoTable.finalY + 15;
+    doc.setFontSize(12);
+    doc.text('4. Stock Loss & Sales Variance Reconciliation', 14, currentY);
+
+    autoTable(doc, {
+      startY: currentY + 5,
+      head: [['Calculation Step', 'Amount (KSh)']],
+      body: [
+        ['Gross Stock Shortage', formatKsh(stockAndSalesResults.grossStockShortage)],
+        ['Positive Sales Variance Available', formatKsh(stockAndSalesResults.positiveSalesVariance)],
+        ['Sales Variance Applied to Offset', formatKsh(stockAndSalesResults.salesOffset)],
+        ['Residual Stock Loss', formatKsh(stockAndSalesResults.residualStockLoss)],
+        ['Remaining Sales Surplus', formatKsh(stockAndSalesResults.remainingSalesSurplus)],
+      ],
+      theme: 'grid',
+      headStyles: { fillColor: [192, 57, 43] }, // Red for loss
+      styles: { fontSize: 10 }
+    });
+
+    // --- SECTION 5: DEBT MOVEMENT ---
+    currentY = doc.lastAutoTable.finalY + 15;
+    doc.setFontSize(12);
+    doc.text('5. Branch Debt Movement', 14, currentY);
+
+    autoTable(doc, {
+      startY: currentY + 5,
+      head: [['Description', 'Date', 'Amount (KSh)']],
+      body: [
+        ['Opening Branch Debt', openingDebtDate, formatKsh(num(openingDebt))],
+        ['Original Closing Debt', closingDebtDate, formatKsh(num(originalClosingDebt))],
+        ['Gross Debt Reduction', '-', formatKsh(debtResults.grossDebtReduction)],
+        ['Add: Residual Stock Loss', '-', formatKsh(stockAndSalesResults.residualStockLoss)],
+        ['Adjusted Closing Debt', '-', formatKsh(debtResults.adjustedClosingDebt)],
+        ['Net Debt Reduction', '-', formatKsh(debtResults.netDebtReduction)],
+        ['Net Debt Reduction Percentage', '-', formatPct(debtResults.debtReductionPercentage)],
+      ],
+      theme: 'striped',
+      headStyles: { fillColor: [39, 174, 96] }, // Green for debt
+      styles: { fontSize: 10 }
+    });
+
+    // --- SECTION 6: APPROVAL ---
+    currentY = doc.lastAutoTable.finalY + 20;
+    
+    // Check if we need a new page for signatures
+    if (currentY > pageHeight - 50) {
+      doc.addPage();
+      currentY = 20;
+    }
+
+    doc.setFontSize(12);
+    doc.text('6. Approval and Audit Trail', 14, currentY);
+
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.text(`Prepared by: ${preparedBy || '_______________________'}`, 14, currentY + 15);
+    doc.text(`Date: ${today}`, 14, currentY + 22);
+
+    doc.text(`Reviewed by: ${reviewedBy || '_______________________'}`, 120, currentY + 15);
+    doc.text(`Date: ___________________`, 120, currentY + 22);
+
+    // Footer
+    doc.setFontSize(8);
+    doc.setTextColor(150);
+    doc.text(`Report generated on ${new Date().toLocaleString()} | Mediocare Pharmaceuticals Ltd`, pageWidth / 2, pageHeight - 10, { align: 'center' });
+
     doc.save(`${branchName}_Financial_Report.pdf`);
   };
 
@@ -230,11 +293,22 @@ export default function Home() {
             <label style={labelStyle}>Original Closing Debt (KSh)</label>
             <input type="number" value={originalClosingDebt} onChange={e => setOriginalClosingDebt(e.target.value)} style={inputStyle} />
           </div>
+
+          <div style={cardStyle}>
+            <h3>4. Approval Details</h3>
+            <label style={labelStyle}>Prepared By</label>
+            <input type="text" value={preparedBy} onChange={e => setPreparedBy(e.target.value)} style={inputStyle} placeholder="Staff Name" />
+            <label style={labelStyle}>Reviewed By</label>
+            <input type="text" value={reviewedBy} onChange={e => setReviewedBy(e.target.value)} style={inputStyle} placeholder="Manager Name" />
+          </div>
         </div>
 
         <div>
           <div style={{ ...cardStyle, backgroundColor: '#eef2f5' }}>
             <h3>Reconciliation Results</h3>
+            <p><strong>Gross Stock Variance:</strong> KSh {formatKsh(stockAndSalesResults.grossStockVariance)} ({formatPct(stockAndSalesResults.stockVariancePercentage)})</p>
+            <p><strong>Sales Variance:</strong> KSh {formatKsh(stockAndSalesResults.salesVariance)} ({formatPct(stockAndSalesResults.salesVariancePercentage)})</p>
+            <hr style={{ margin: '15px 0', borderTop: '1px solid #ccc' }} />
             <p><strong>Gross Stock Shortage:</strong> KSh {formatKsh(stockAndSalesResults.grossStockShortage)}</p>
             <p><strong>Sales Offset Applied:</strong> KSh {formatKsh(stockAndSalesResults.salesOffset)}</p>
             <p style={{ color: stockAndSalesResults.residualStockLoss > 0 ? 'red' : 'green', fontSize: '18px' }}>
@@ -242,7 +316,7 @@ export default function Home() {
             </p>
             <hr style={{ margin: '15px 0', borderTop: '1px solid #ccc' }} />
             <p><strong>Adjusted Closing Debt:</strong> KSh {formatKsh(debtResults.adjustedClosingDebt)}</p>
-            <p style={{ color: 'green', fontSize: '18px' }}><strong>Net Debt Reduction:</strong> KSh {formatKsh(debtResults.netDebtReduction)}</p>
+            <p style={{ color: 'green', fontSize: '18px' }}><strong>Net Debt Reduction:</strong> KSh {formatKsh(debtResults.netDebtReduction)} ({formatPct(debtResults.debtReductionPercentage)})</p>
           </div>
           
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
@@ -250,7 +324,7 @@ export default function Home() {
               {isSaving ? 'Saving...' : 'Save Draft to Database'}
             </button>
             <button onClick={generatePDF} style={{ width: '100%', padding: '15px', backgroundColor: '#000', color: '#fff', fontSize: '16px', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
-              Download PDF Report
+              Download Professional PDF Report
             </button>
           </div>
         </div>
