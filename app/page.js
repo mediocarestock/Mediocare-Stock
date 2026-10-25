@@ -17,9 +17,17 @@ export default function Home() {
   const [authLoading, setAuthLoading] = useState(true);
 
   // --- UI STATE ---
-  const [activeTab, setActiveTab] = useState('create'); 
+  const [activeTab, setActiveTab] = useState('dashboard'); // 'dashboard', 'create', 'history', 'consolidated'
   const [branches, setBranches] = useState([]);
   const [isSaving, setIsSaving] = useState(false);
+
+  // --- DASHBOARD STATE ---
+  const [dashboardStats, setDashboardStats] = useState({
+    totalBranches: 17,
+    pendingReports: 0,
+    totalStockLoss: 0,
+    totalAdjustedDebt: 0
+  });
 
   // --- CREATE REPORT STATE ---
   const [selectedBranch, setSelectedBranch] = useState('');
@@ -54,12 +62,17 @@ export default function Home() {
   useEffect(() => {
     if (session) {
       supabase.from('branches').select('*').order('name').then(({ data }) => {
-        if (data) setBranches(data);
+        if (data) {
+          setBranches(data);
+          setDashboardStats(prev => ({ ...prev, totalBranches: data.length }));
+        }
       });
     }
   }, [session]);
 
+  // Load data based on tab
   useEffect(() => {
+    if (activeTab === 'dashboard') fetchDashboardData();
     if (activeTab === 'history') fetchHistory();
     if (activeTab === 'consolidated') fetchConsolidated();
   }, [activeTab]);
@@ -124,7 +137,7 @@ export default function Home() {
         }
         await supabase.from('sales_records').insert({ report_id: reportData.id, salesperson_id: spId, actual_sales: num(person.actual), system_sales: num(person.system), credit_sales: num(person.credit) });
       }
-      alert('Report saved successfully!');
+      alert('Report saved successfully as Draft!');
       setActiveTab('history');
     } catch (err) {
       alert('Error saving: ' + err.message);
@@ -133,7 +146,64 @@ export default function Home() {
     }
   };
 
+  // --- APPROVE REPORT ---
+  const handleApprove = async (reportId) => {
+    if(!confirm("Are you sure you want to approve this report? Once approved, it is locked for audit purposes.")) return;
+    
+    const { error } = await supabase.from('reports').update({ status: 'Approved' }).eq('id', reportId);
+    if (error) {
+      alert("Error approving: " + error.message);
+    } else {
+      alert("Report Approved successfully.");
+      fetchHistory();
+    }
+  };
+
   // --- FETCH DATA ---
+  const fetchDashboardData = async () => {
+    setIsLoadingData(true);
+    // Get all reports
+    const { data } = await supabase.from('reports').select(`
+      id, status,
+      stock_takes(opening_stock, physical_stock),
+      debt_records(opening_debt, original_closing_debt),
+      sales_records(actual_sales, system_sales, credit_sales)
+    `);
+
+    if (data) {
+      let pending = 0;
+      let tStockLoss = 0;
+      let tAdjDebt = 0;
+
+      // Aggregate across all reports for a company-wide view
+      data.forEach(r => {
+        if (r.status !== 'Approved') pending++;
+        
+        const tAct = r.sales_records?.reduce((s, x) => s + x.actual_sales, 0) || 0;
+        const tSys = r.sales_records?.reduce((s, x) => s + x.system_sales, 0) || 0;
+        const tCre = r.sales_records?.reduce((s, x) => s + x.credit_sales, 0) || 0;
+        const oStk = r.stock_takes?.[0]?.opening_stock || 0;
+        const pStk = r.stock_takes?.[0]?.physical_stock || 0;
+        const oDebt = r.debt_records?.[0]?.opening_debt || 0;
+        const cDebt = r.debt_records?.[0]?.original_closing_debt || 0;
+
+        const res = calculateStockAndSales(oStk, pStk, tAct, tSys - tCre);
+        const db = calculateDebt(oDebt, cDebt, res.residualStockLoss);
+
+        tStockLoss += res.residualStockLoss;
+        tAdjDebt += db.adjustedClosingDebt;
+      });
+
+      setDashboardStats(prev => ({
+        ...prev,
+        pendingReports: pending,
+        totalStockLoss: tStockLoss,
+        totalAdjustedDebt: tAdjDebt
+      }));
+    }
+    setIsLoadingData(false);
+  };
+
   const fetchHistory = async () => {
     setIsLoadingData(true);
     const { data } = await supabase.from('reports').select(`id, period_start, period_end, status, created_at, branches (name)`).order('created_at', { ascending: false });
@@ -144,7 +214,7 @@ export default function Home() {
   const fetchConsolidated = async () => {
     setIsLoadingData(true);
     const { data } = await supabase.from('reports').select(`
-      id, period_start, period_end, branch_id, branches(name),
+      id, period_start, period_end, branch_id, status, branches(name),
       stock_takes(opening_stock, physical_stock),
       debt_records(opening_debt, original_closing_debt),
       sales_records(actual_sales, system_sales, credit_sales)
@@ -152,9 +222,9 @@ export default function Home() {
 
     if (data) {
       const grouped = {};
-      // Only take the LATEST report per branch to avoid double counting
+      // Only take APPROVED reports for the final consolidated view, or latest Drafts if none approved
       data.forEach(r => {
-        if (!grouped[r.branch_id]) {
+        if (!grouped[r.branch_id] || r.status === 'Approved') {
           const tAct = r.sales_records.reduce((s, x) => s + x.actual_sales, 0);
           const tSys = r.sales_records.reduce((s, x) => s + x.system_sales, 0);
           const tCre = r.sales_records.reduce((s, x) => s + x.credit_sales, 0);
@@ -170,7 +240,7 @@ export default function Home() {
             name: r.branches?.name || 'Unknown', period: `${r.period_start} to ${r.period_end}`,
             openingDebt: oDebt, adjClosingDebt: debt.adjustedClosingDebt,
             netReduction: debt.netDebtReduction, stockLoss: results.grossStockVariance,
-            salesVariance: results.salesVariance
+            salesVariance: results.salesVariance, status: r.status
           };
         }
       });
@@ -204,7 +274,6 @@ export default function Home() {
       const groupX = startX + (i * barGroupWidth) + (barGroupWidth * 0.15);
       const h1 = ((d.val1 - 0) / (maxVal - minVal)) * height; const y1 = zeroLineY - h1;
       
-      // Color code: Red for negative, Blue for positive
       doc.setFillColor(d.val1 >= 0 ? 41 : 192, d.val1 >= 0 ? 128 : 57, d.val1 >= 0 ? 185 : 43); 
       doc.rect(groupX, h1 > 0 ? y1 : zeroLineY, barWidth, Math.abs(h1), 'F');
 
@@ -244,14 +313,12 @@ export default function Home() {
     generateBranchPDF({ branchName, results: stockAndSalesResults, debtResults });
   };
 
-  // --- UPGRADED CONSOLIDATED PDF ---
   const generateConsolidatedPDF = () => {
     if(consolidatedData.length === 0) return alert("No data available to consolidate.");
     
     const doc = new jsPDF('landscape');
     const pageWidth = doc.internal.pageSize.getWidth();
     
-    // HEADER
     doc.setFontSize(16); doc.setFont('helvetica', 'bold');
     doc.text('MEDIOCARE PHARMACEUTICALS LTD', pageWidth / 2, 20, { align: 'center' });
     doc.setFontSize(12);
@@ -259,58 +326,32 @@ export default function Home() {
     doc.setFontSize(9); doc.setFont('helvetica', 'normal');
     doc.text(`Generated on: ${new Date().toLocaleString()} | Base Currency: KES`, pageWidth / 2, 34, { align: 'center' });
 
-    // CALCULATE TOTALS
     const totals = consolidatedData.reduce((acc, curr) => {
-      acc.openingDebt += curr.openingDebt;
-      acc.adjClosingDebt += curr.adjClosingDebt;
-      acc.netReduction += curr.netReduction;
-      acc.stockLoss += curr.stockLoss;
+      acc.openingDebt += curr.openingDebt; acc.adjClosingDebt += curr.adjClosingDebt;
+      acc.netReduction += curr.netReduction; acc.stockLoss += curr.stockLoss;
       acc.salesVariance += curr.salesVariance;
       return acc;
     }, { openingDebt: 0, adjClosingDebt: 0, netReduction: 0, stockLoss: 0, salesVariance: 0 });
 
-    // TABLE DATA
     const tableBody = consolidatedData.map(d => [
-      d.name, d.period, formatKsh(d.openingDebt), formatKsh(d.adjClosingDebt), 
+      d.name, d.period, d.status, formatKsh(d.openingDebt), formatKsh(d.adjClosingDebt), 
       formatKsh(d.netReduction), formatKsh(d.stockLoss), formatKsh(d.salesVariance)
     ]);
 
     autoTable(doc, {
       startY: 45,
-      head: [['Branch', 'Period', 'Opening Debt', 'Adj. Closing Debt', 'Net Reduction', 'Stock Loss', 'Sales Variance']],
+      head: [['Branch', 'Period', 'Status', 'Opening Debt', 'Adj. Closing Debt', 'Net Reduction', 'Stock Loss', 'Sales Var.']],
       body: tableBody,
-      foot: [['GRAND TOTALS', '-', formatKsh(totals.openingDebt), formatKsh(totals.adjClosingDebt), formatKsh(totals.netReduction), formatKsh(totals.stockLoss), formatKsh(totals.salesVariance)]],
+      foot: [['GRAND TOTALS', '-', '-', formatKsh(totals.openingDebt), formatKsh(totals.adjClosingDebt), formatKsh(totals.netReduction), formatKsh(totals.stockLoss), formatKsh(totals.salesVariance)]],
       theme: 'grid', 
       headStyles: { fillColor: [44, 62, 80] },
       footStyles: { fillColor: [0, 0, 0], textColor: [255, 255, 255], fontStyle: 'bold' },
-      styles: { fontSize: 8 },
-      didParseCell: function (data) {
-        if (data.section === 'body' && data.column.index === 4) {
-          if (data.cell.text[0].includes('-')) data.cell.styles.textColor = [192, 57, 43];
-        }
-      }
+      styles: { fontSize: 8 }
     });
 
-    // ANALYSIS TEXT
-    const highestStockLoss = [...consolidatedData].sort((a, b) => b.stockLoss - a.stockLoss)[0];
-    const highestSalesVar = [...consolidatedData].sort((a, b) => b.salesVariance - a.salesVariance)[0];
-    
-    let textY = doc.lastAutoTable.finalY + 10;
-    doc.setFontSize(10); doc.setFont('helvetica', 'bold'); doc.setTextColor(0);
-    doc.text('Automated Head Office Analysis:', 14, textY);
-    
-    doc.setFont('helvetica', 'normal'); doc.setFontSize(9);
-    textY += 6;
-    doc.text(`• Total Company Stock Loss: Ksh ${formatKsh(totals.stockLoss)}`, 14, textY);
-    textY += 5;
-    doc.text(`• Highest Stock Loss Branch: ${highestStockLoss.name} (Ksh ${formatKsh(highestStockLoss.stockLoss)})`, 14, textY);
-    textY += 5;
-    doc.text(`• Highest Sales Variance Branch: ${highestSalesVar.name} (Ksh ${formatKsh(highestSalesVar.salesVariance)})`, 14, textY);
-
-    // CHART
     const chartData = consolidatedData.slice(0, 12).map(d => ({ label: d.name, val1: d.netReduction }));
     if(chartData.length > 0) {
-      drawBarChart(doc, 14, textY + 25, pageWidth - 28, 50, chartData, 'Net Debt Reduction by Branch (Positive = Good, Negative = Adverse)');
+      drawBarChart(doc, 14, doc.lastAutoTable.finalY + 20, pageWidth - 28, 50, chartData, 'Net Debt Reduction by Branch (Positive = Good)');
     }
 
     doc.save(`Company_Consolidated_Report.pdf`);
@@ -324,28 +365,19 @@ export default function Home() {
       <div style={{ maxWidth: '400px', margin: '100px auto', fontFamily: 'system-ui', padding: '30px', border: '1px solid #ddd', borderRadius: '8px', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}>
         <h2 style={{ textAlign: 'center', marginBottom: '20px' }}>Mediocare Login</h2>
         <form onSubmit={async (e) => {
-          e.preventDefault();
-          setAuthError('');
-          const { error } = isSignUp 
-            ? await supabase.auth.signUp({ email, password })
-            : await supabase.auth.signInWithPassword({ email, password });
+          e.preventDefault(); setAuthError('');
+          const { error } = isSignUp ? await supabase.auth.signUp({ email, password }) : await supabase.auth.signInWithPassword({ email, password });
           if (error) setAuthError(error.message);
           else if (isSignUp) alert('Check your email for the confirmation link!');
         }}>
           {authError && <p style={{ color: 'red', fontSize: '14px' }}>{authError}</p>}
           <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold' }}>Email</label>
           <input type="email" value={email} onChange={e => setEmail(e.target.value)} required style={{ width: '100%', padding: '10px', marginBottom: '15px', border: '1px solid #ccc', borderRadius: '4px' }} />
-          
           <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold' }}>Password</label>
           <input type="password" value={password} onChange={e => setPassword(e.target.value)} required style={{ width: '100%', padding: '10px', marginBottom: '20px', border: '1px solid #ccc', borderRadius: '4px' }} />
-          
-          <button type="submit" style={{ width: '100%', padding: '12px', backgroundColor: '#000', color: '#fff', border: 'none', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer' }}>
-            {isSignUp ? 'Sign Up' : 'Log In'}
-          </button>
+          <button type="submit" style={{ width: '100%', padding: '12px', backgroundColor: '#000', color: '#fff', border: 'none', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer' }}>{isSignUp ? 'Sign Up' : 'Log In'}</button>
         </form>
-        <p style={{ textAlign: 'center', marginTop: '20px', cursor: 'pointer', color: '#0070f3', fontSize: '14px' }} onClick={() => setIsSignUp(!isSignUp)}>
-          {isSignUp ? 'Already have an account? Log In' : 'Need an account? Sign Up'}
-        </p>
+        <p style={{ textAlign: 'center', marginTop: '20px', cursor: 'pointer', color: '#0070f3', fontSize: '14px' }} onClick={() => setIsSignUp(!isSignUp)}>{isSignUp ? 'Already have an account? Log In' : 'Need an account? Sign Up'}</p>
       </div>
     );
   }
@@ -361,12 +393,38 @@ export default function Home() {
           <span style={{ fontSize: '12px', color: '#666' }}>Logged in as: {session.user.email}</span>
         </div>
         <div>
+          <button onClick={() => setActiveTab('dashboard')} style={{ padding: '10px 20px', marginRight: '10px', backgroundColor: activeTab === 'dashboard' ? '#333' : '#eee', color: activeTab === 'dashboard' ? '#fff' : '#333', border: 'none', cursor: 'pointer', borderRadius: '4px', fontWeight: 'bold' }}>Dashboard</button>
           <button onClick={() => setActiveTab('create')} style={{ padding: '10px 20px', marginRight: '10px', backgroundColor: activeTab === 'create' ? '#333' : '#eee', color: activeTab === 'create' ? '#fff' : '#333', border: 'none', cursor: 'pointer', borderRadius: '4px' }}>New Report</button>
           <button onClick={() => setActiveTab('history')} style={{ padding: '10px 20px', marginRight: '10px', backgroundColor: activeTab === 'history' ? '#333' : '#eee', color: activeTab === 'history' ? '#fff' : '#333', border: 'none', cursor: 'pointer', borderRadius: '4px' }}>History</button>
           <button onClick={() => setActiveTab('consolidated')} style={{ padding: '10px 20px', marginRight: '10px', backgroundColor: activeTab === 'consolidated' ? '#333' : '#eee', color: activeTab === 'consolidated' ? '#fff' : '#333', border: 'none', cursor: 'pointer', borderRadius: '4px' }}>Consolidated</button>
           <button onClick={() => supabase.auth.signOut()} style={{ padding: '10px 20px', backgroundColor: '#ff4d4f', color: '#fff', border: 'none', cursor: 'pointer', borderRadius: '4px' }}>Logout</button>
         </div>
       </div>
+
+      {/* DASHBOARD TAB */}
+      {activeTab === 'dashboard' && (
+        <div>
+          <h2 style={{ marginBottom: '20px' }}>Company Overview</h2>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '20px', marginBottom: '30px' }}>
+            <div style={{ padding: '20px', backgroundColor: '#f9f9f9', borderRadius: '8px', borderLeft: '5px solid #333' }}>
+              <p style={{ margin: '0 0 10px 0', fontSize: '14px', color: '#666', fontWeight: 'bold' }}>Total Branches</p>
+              <h1 style={{ margin: 0, fontSize: '32px' }}>{dashboardStats.totalBranches}</h1>
+            </div>
+            <div style={{ padding: '20px', backgroundColor: '#fff3cd', borderRadius: '8px', borderLeft: '5px solid #ff9800' }}>
+              <p style={{ margin: '0 0 10px 0', fontSize: '14px', color: '#666', fontWeight: 'bold' }}>Reports Pending Approval</p>
+              <h1 style={{ margin: 0, fontSize: '32px', color: '#ff9800' }}>{dashboardStats.pendingReports}</h1>
+            </div>
+            <div style={{ padding: '20px', backgroundColor: '#f8d7da', borderRadius: '8px', borderLeft: '5px solid #dc3545' }}>
+              <p style={{ margin: '0 0 10px 0', fontSize: '14px', color: '#666', fontWeight: 'bold' }}>Total Residual Stock Loss</p>
+              <h1 style={{ margin: 0, fontSize: '28px', color: '#dc3545' }}>Ksh {formatKsh(dashboardStats.totalStockLoss)}</h1>
+            </div>
+            <div style={{ padding: '20px', backgroundColor: '#d4edda', borderRadius: '8px', borderLeft: '5px solid #28a745' }}>
+              <p style={{ margin: '0 0 10px 0', fontSize: '14px', color: '#666', fontWeight: 'bold' }}>Total Adjusted Closing Debt</p>
+              <h1 style={{ margin: 0, fontSize: '28px', color: '#28a745' }}>Ksh {formatKsh(dashboardStats.totalAdjustedDebt)}</h1>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* CREATE TAB */}
       {activeTab === 'create' && (
@@ -483,6 +541,7 @@ export default function Home() {
                   <th style={{ padding: '10px' }}>Branch</th>
                   <th style={{ padding: '10px' }}>Period</th>
                   <th style={{ padding: '10px' }}>Status</th>
+                  <th style={{ padding: '10px' }}>Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -491,7 +550,18 @@ export default function Home() {
                     <td style={{ padding: '10px' }}>{new Date(r.created_at).toLocaleDateString()}</td>
                     <td style={{ padding: '10px', fontWeight: 'bold' }}>{r.branches?.name}</td>
                     <td style={{ padding: '10px' }}>{r.period_start} to {r.period_end}</td>
-                    <td style={{ padding: '10px' }}><span style={{ padding: '4px 8px', backgroundColor: '#ff9800', color: '#fff', borderRadius: '12px', fontSize: '12px' }}>{r.status}</span></td>
+                    <td style={{ padding: '10px' }}>
+                      <span style={{ padding: '4px 8px', backgroundColor: r.status === 'Approved' ? '#28a745' : '#ff9800', color: '#fff', borderRadius: '12px', fontSize: '12px', fontWeight: 'bold' }}>
+                        {r.status}
+                      </span>
+                    </td>
+                    <td style={{ padding: '10px' }}>
+                      {r.status !== 'Approved' ? (
+                        <button onClick={() => handleApprove(r.id)} style={{ padding: '6px 12px', backgroundColor: '#28a745', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', fontSize: '12px' }}>Approve</button>
+                      ) : (
+                        <span style={{ color: '#666', fontSize: '12px' }}>Locked</span>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -513,6 +583,7 @@ export default function Home() {
               <thead>
                 <tr style={{ borderBottom: '2px solid #ddd', backgroundColor: '#eef2f5' }}>
                   <th style={{ padding: '10px' }}>Branch</th>
+                  <th style={{ padding: '10px' }}>Status</th>
                   <th style={{ padding: '10px' }}>Period</th>
                   <th style={{ padding: '10px' }}>Opening Debt</th>
                   <th style={{ padding: '10px' }}>Adj. Closing Debt</th>
@@ -525,6 +596,7 @@ export default function Home() {
                 {consolidatedData.map((d, i) => (
                   <tr key={i} style={{ borderBottom: '1px solid #eee' }}>
                     <td style={{ padding: '10px', fontWeight: 'bold' }}>{d.name}</td>
+                    <td style={{ padding: '10px' }}>{d.status}</td>
                     <td style={{ padding: '10px' }}>{d.period}</td>
                     <td style={{ padding: '10px' }}>{formatKsh(d.openingDebt)}</td>
                     <td style={{ padding: '10px' }}>{formatKsh(d.adjClosingDebt)}</td>
