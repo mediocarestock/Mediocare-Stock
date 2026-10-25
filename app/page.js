@@ -30,6 +30,7 @@ export default function Home() {
   // --- CREATE / EDIT REPORT STATE ---
   const [editingReportId, setEditingReportId] = useState(null);
   const [selectedBranch, setSelectedBranch] = useState('');
+  const [previousClosingStock, setPreviousClosingStock] = useState(null); // NEW: Tracks last month's closing stock
   const [openingStock, setOpeningStock] = useState('');
   const [physicalStock, setPhysicalStock] = useState('');
   const [openingDebt, setOpeningDebt] = useState('');
@@ -75,6 +76,13 @@ export default function Home() {
     }
   }, [session]);
 
+  // Fetch Previous Closing Stock when Branch changes
+  useEffect(() => {
+    if (selectedBranch && !editingReportId) {
+      fetchPreviousStock(selectedBranch);
+    }
+  }, [selectedBranch, editingReportId]);
+
   useEffect(() => {
     if (activeTab === 'dashboard') fetchDashboardData();
     if (activeTab === 'history') fetchHistory();
@@ -85,6 +93,25 @@ export default function Home() {
   const num = (val) => parseFloat(val) || 0;
   const formatKsh = (amount) => new Intl.NumberFormat('en-KE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount);
   const formatNum = (amount) => new Intl.NumberFormat('en-KE', { maximumFractionDigits: 0 }).format(amount);
+
+  const fetchPreviousStock = async (branchId) => {
+    const { data } = await supabase
+      .from('reports')
+      .select('period_start, stock_takes(physical_stock)')
+      .eq('branch_id', branchId)
+      .lt('period_start', periodStart) // Only look at past reports
+      .order('period_start', { ascending: false })
+      .limit(1);
+      
+    if (data && data.length > 0 && data[0].stock_takes && data[0].stock_takes.length > 0) {
+      setPreviousClosingStock({
+        amount: data[0].stock_takes[0].physical_stock,
+        date: data[0].period_start
+      });
+    } else {
+      setPreviousClosingStock(null);
+    }
+  };
 
   const handleCSVUpload = (e) => {
     const file = e.target.files[0];
@@ -108,20 +135,12 @@ export default function Home() {
   const totalStaffSystem = staff.reduce((sum, s) => sum + num(s.system), 0);
   const totalStaffCredit = staff.reduce((sum, s) => sum + num(s.credit), 0);
 
-  // Determine Branch Totals (Fallback to staff sums if left blank)
   const finalBranchActual = branchActual !== '' ? num(branchActual) : totalStaffActual;
   const finalBranchSystem = branchSystem !== '' ? num(branchSystem) : totalStaffSystem;
   const finalBranchCredit = branchCredit !== '' ? num(branchCredit) : totalStaffCredit;
 
-  // Adjusted System Sales = System - Credit
   const adjustedSystemSales = finalBranchSystem - finalBranchCredit;
   
-  // Unallocated Gap
-  const unallocatedActual = finalBranchActual - totalStaffActual;
-  const unallocatedSystem = finalBranchSystem - totalStaffSystem;
-  const unallocatedCredit = finalBranchCredit - totalStaffCredit;
-
-  // Core Math
   const stockAndSalesResults = calculateStockAndSales(num(openingStock), num(physicalStock), finalBranchActual, adjustedSystemSales);
   const debtResults = calculateDebt(num(openingDebt), num(originalClosingDebt), stockAndSalesResults.residualStockLoss);
   const branchName = branches.find(b => b.id === selectedBranch)?.name || '';
@@ -188,6 +207,7 @@ export default function Home() {
     setOpeningDebt(''); setOriginalClosingDebt(''); setStaff([{ name: '', actual: '', system: '', credit: '' }]);
     setPeriodStart(today); setPeriodEnd(today);
     setBranchActual(''); setBranchSystem(''); setBranchCredit('');
+    setPreviousClosingStock(null);
   };
 
   const handleEditReport = (report) => {
@@ -308,7 +328,7 @@ export default function Home() {
   };
 
   // --- SHARED DATA BUILDER ---
-  const buildReportData = (isHistory = false, report = null) => {
+  const buildReportData = (isHistory = false, report = null, prevStockData = null) => {
     if (isHistory) {
       const oStk = report.stock_takes?.[0]?.opening_stock || 0;
       const pStk = report.stock_takes?.[0]?.physical_stock || 0;
@@ -333,7 +353,8 @@ export default function Home() {
         openingDebtDate: report.debt_records?.[0]?.opening_debt_date || 'N/A',
         closingDebtDate: report.debt_records?.[0]?.closing_debt_date || 'N/A',
         results, debtResults, staff: staffData,
-        branchActual: tAct, branchSystem: tSys, branchCredit: tCre
+        branchActual: tAct, branchSystem: tSys, branchCredit: tCre,
+        previousStock: prevStockData // Passed from history if available
       };
     } else {
       return {
@@ -342,12 +363,13 @@ export default function Home() {
         openingDebt: num(openingDebt), originalClosingDebt: num(originalClosingDebt),
         openingDebtDate, closingDebtDate, results: stockAndSalesResults, debtResults,
         staff: staff.map(s => ({ name: s.name || 'Unnamed', actual: num(s.actual), system: num(s.system), credit: num(s.credit) })),
-        branchActual: finalBranchActual, branchSystem: finalBranchSystem, branchCredit: finalBranchCredit
+        branchActual: finalBranchActual, branchSystem: finalBranchSystem, branchCredit: finalBranchCredit,
+        previousStock: previousClosingStock
       };
     }
   };
 
-  // --- SMART NOTES GENERATOR ---
+  // --- SMART NOTES & PROGRESS ALGORITHM ---
   const generateNotes = (data) => {
     let notes = [];
     
@@ -377,11 +399,31 @@ export default function Home() {
       notes.push(`No residual stock loss was added to the debt. The adjusted closing debt remains at Ksh ${formatKsh(data.debtResults.adjustedClosingDebt)}.`);
     }
 
-    // 4. Final Debt Movement
-    if (data.debtResults.netDebtReduction >= 0) {
-      notes.push(`Overall, the branch achieved a net debt reduction of Ksh ${formatKsh(data.debtResults.netDebtReduction)} (${data.debtResults.debtReductionPercentage?.toFixed(2)}%).`);
+    // 4. STOCK vs DEBT PROGRESS ALGORITHM
+    if (data.previousStock && data.previousStock.amount !== null) {
+      const prevStockVal = data.previousStock.amount;
+      const currStockVal = data.physicalStock;
+      const stockChange = currStockVal - prevStockVal;
+      const debtChange = data.debtResults.adjustedClosingDebt - data.openingDebt;
+
+      let stockTrend = stockChange > 0 ? `increased by Ksh ${formatKsh(stockChange)}` : stockChange < 0 ? `reduced by Ksh ${formatKsh(Math.abs(stockChange))}` : 'remained stagnant';
+      let debtTrend = debtChange > 0 ? `increased by Ksh ${formatKsh(Math.abs(debtChange))}` : debtChange < 0 ? `reduced by Ksh ${formatKsh(Math.abs(debtChange))}` : 'remained stagnant';
+
+      notes.push(`-- BRANCH PROGRESS ANALYSIS --`);
+      notes.push(`Compared to the previous closing stock of Ksh ${formatKsh(prevStockVal)} (${data.previousStock.date}), the current closing stock has ${stockTrend}. Over the same period, the adjusted branch debt has ${debtTrend} (Opening: Ksh ${formatKsh(data.openingDebt)} -> Adjusted Closing: Ksh ${formatKsh(data.debtResults.adjustedClosingDebt)}).`);
+
+      if (stockChange >= 0 && debtChange < 0) {
+        notes.push(`DIAGNOSIS: EXCELLENT PROGRESS. The branch successfully increased its physical stock holding while simultaneously reducing its debt to Head Office. This indicates strong sales, good collections, and proper capital management.`);
+      } else if (stockChange <= 0 && debtChange < 0) {
+        notes.push(`DIAGNOSIS: HEALTHY PROGRESS. The branch liquidated existing stock and used the proceeds to reduce its debt. This is a standard healthy trading cycle.`);
+      } else if (stockChange >= 0 && debtChange >= 0) {
+        notes.push(`DIAGNOSIS: CONCERNING. Both stock and debt have increased. While the branch is stocking up, it is not remitting enough cash to Head Office relative to the value it is consuming. Investigate credit sales and collection rates.`);
+      } else if (stockChange < 0 && debtChange >= 0) {
+        notes.push(`DIAGNOSIS: CRITICAL RISK. The branch's stock has depleted, yet its debt has increased. This indicates that stock is leaving the branch without corresponding cash remittances. This is a major red flag for unrecorded sales, pilferage, or significant uncollected credit sales. Immediate investigation is required.`);
+      }
     } else {
-      notes.push(`Overall, the branch recorded an adverse net debt increase of Ksh ${formatKsh(Math.abs(data.debtResults.netDebtReduction))}.`);
+      notes.push(`-- BRANCH PROGRESS ANALYSIS --`);
+      notes.push(`No previous stock report found for this branch. Cannot perform period-on-period stock vs. debt progress analysis.`);
     }
 
     return notes;
@@ -433,15 +475,23 @@ export default function Home() {
     doc.setFontSize(9); doc.setFont('helvetica', 'normal');
     doc.text(`Period: ${data.periodStart} to ${data.periodEnd}`, pageWidth / 2, 34, { align: 'center' });
 
-    // 1. EXEC SUMMARY
+    // 1. EXEC SUMMARY & NOTES
     const notes = generateNotes(data);
     doc.setFontSize(11); doc.setFont('helvetica', 'bold');
-    doc.text('1. Executive Summary & Notes', 14, 45);
+    doc.text('1. Executive Summary & Diagnostic Notes', 14, 45);
     doc.setFontSize(9); doc.setFont('helvetica', 'normal');
     let summaryY = 52;
     notes.forEach(text => {
-      const splitText = doc.splitTextToSize(`• ${text}`, pageWidth - 28);
-      doc.text(splitText, 14, summaryY); summaryY += (splitText.length * 5) + 2;
+      if (text.startsWith('--')) {
+        doc.setFont('helvetica', 'bold');
+        doc.text(text, 14, summaryY);
+        summaryY += 5;
+        doc.setFont('helvetica', 'normal');
+      } else {
+        const splitText = doc.splitTextToSize(`• ${text}`, pageWidth - 28);
+        doc.text(splitText, 14, summaryY); 
+        summaryY += (splitText.length * 5) + 2;
+      }
     });
 
     // 2. STOCK POSITION
@@ -640,13 +690,22 @@ export default function Home() {
             <div>
               <div style={{ padding: '20px', backgroundColor: '#f9f9f9', borderRadius: '8px', marginBottom: '20px', border: '1px solid #ddd' }}>
                 <h3 style={{ marginTop: 0 }}>1. Stock & Debt Core</h3>
+                
+                {/* PREVIOUS CLOSING STOCK BANNER */}
+                {previousClosingStock && (
+                  <div style={{ padding: '10px', backgroundColor: '#eef2f5', borderLeft: '4px solid #0070f3', marginBottom: '15px', fontSize: '13px' }}>
+                    <strong>Previous Closing Stock (from {previousClosingStock.date}):</strong> Ksh {formatKsh(previousClosingStock.amount)}
+                    <br/><span style={{ color: '#666' }}>Enter your current physical stock below to analyze branch progress.</span>
+                  </div>
+                )}
+
                 <div style={{ display: 'flex', gap: '10px' }}>
                   <div style={{ flex: 1 }}>
-                    <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Opening Stock (Ksh)</label>
+                    <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Opening Stock (Book Value)</label>
                     <input type="number" value={openingStock} onChange={e => setOpeningStock(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
                   </div>
                   <div style={{ flex: 1 }}>
-                    <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Physical Stock (Ksh)</label>
+                    <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>New Closing Stock (Physical)</label>
                     <input type="number" value={physicalStock} onChange={e => setPhysicalStock(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
                   </div>
                 </div>
@@ -819,7 +878,10 @@ export default function Home() {
               <h3 style={{ fontSize: '16px', borderBottom: '2px solid #000', paddingBottom: '5px', marginTop: '30px' }}>1. Executive Summary & Notes</h3>
               <ul style={{ fontSize: '14px', lineHeight: '1.6', paddingLeft: '20px' }}>
                 {generateNotes(viewingReport).map((note, idx) => (
-                  <li key={idx} style={{ marginBottom: '8px' }}>{note}</li>
+                  note.startsWith('--') ? 
+                    <div key={idx} style={{ marginTop: '15px', marginBottom: '5px', fontWeight: 'bold', marginLeft: '-20px' }}>{note}</div> 
+                  : 
+                    <li key={idx} style={{ marginBottom: '8px' }}>{note}</li>
                 ))}
               </ul>
 
