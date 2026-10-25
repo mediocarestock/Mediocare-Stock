@@ -34,6 +34,12 @@ export default function Home() {
   const [physicalStock, setPhysicalStock] = useState('');
   const [openingDebt, setOpeningDebt] = useState('');
   const [originalClosingDebt, setOriginalClosingDebt] = useState('');
+  
+  // Branch Aggregates
+  const [branchActual, setBranchActual] = useState('');
+  const [branchSystem, setBranchSystem] = useState('');
+  const [branchCredit, setBranchCredit] = useState('');
+
   const today = new Date().toISOString().split('T')[0];
   const [periodStart, setPeriodStart] = useState(today);
   const [periodEnd, setPeriodEnd] = useState(today);
@@ -98,12 +104,24 @@ export default function Home() {
   };
 
   // --- CALCULATIONS ---
-  const totalActual = staff.reduce((sum, s) => sum + num(s.actual), 0);
-  const totalSystem = staff.reduce((sum, s) => sum + num(s.system), 0);
-  const totalCredit = staff.reduce((sum, s) => sum + num(s.credit), 0);
-  const adjustedSystemSales = totalSystem - totalCredit;
+  // Calculate Staff Totals
+  const totalStaffActual = staff.reduce((sum, s) => sum + num(s.actual), 0);
+  const totalStaffSystem = staff.reduce((sum, s) => sum + num(s.system), 0);
+  const totalStaffCredit = staff.reduce((sum, s) => sum + num(s.credit), 0);
+
+  // Determine Branch Totals (Use explicit input if provided, otherwise fallback to staff sum)
+  const finalBranchActual = branchActual !== '' ? num(branchActual) : totalStaffActual;
+  const finalBranchSystem = branchSystem !== '' ? num(branchSystem) : totalStaffSystem;
+  const finalBranchCredit = branchCredit !== '' ? num(branchCredit) : totalStaffCredit;
+
+  const adjustedSystemSales = finalBranchSystem - finalBranchCredit;
   
-  const stockAndSalesResults = calculateStockAndSales(num(openingStock), num(physicalStock), totalActual, adjustedSystemSales);
+  // Unallocated Gap (Branch vs Individual)
+  const unallocatedActual = finalBranchActual - totalStaffActual;
+  const unallocatedSystem = finalBranchSystem - totalStaffSystem;
+  const unallocatedCredit = finalBranchCredit - totalStaffCredit;
+
+  const stockAndSalesResults = calculateStockAndSales(num(openingStock), num(physicalStock), finalBranchActual, adjustedSystemSales);
   const debtResults = calculateDebt(num(openingDebt), num(originalClosingDebt), stockAndSalesResults.residualStockLoss);
   const branchName = branches.find(b => b.id === selectedBranch)?.name || '';
 
@@ -113,15 +131,23 @@ export default function Home() {
     setIsSaving(true);
     try {
       let reportId = editingReportId;
+      const reportPayload = { 
+        branch_id: selectedBranch, 
+        period_start: periodStart, 
+        period_end: periodEnd,
+        branch_actual_sales: finalBranchActual,
+        branch_system_sales: finalBranchSystem,
+        branch_credit_sales: finalBranchCredit
+      };
 
       if (editingReportId) {
-        await supabase.from('reports').update({ branch_id: selectedBranch, period_start: periodStart, period_end: periodEnd }).eq('id', editingReportId);
+        await supabase.from('reports').update(reportPayload).eq('id', editingReportId);
         await supabase.from('stock_takes').delete().eq('report_id', editingReportId);
         await supabase.from('debt_records').delete().eq('report_id', editingReportId);
         await supabase.from('sales_records').delete().eq('report_id', editingReportId);
       } else {
         const { data: reportData, error: reportError } = await supabase.from('reports').insert({ 
-          branch_id: selectedBranch, period_start: periodStart, period_end: periodEnd, status: 'Draft' 
+          ...reportPayload, status: 'Draft' 
         }).select().single();
         if (reportError) throw reportError;
         reportId = reportData.id;
@@ -160,6 +186,7 @@ export default function Home() {
     setEditingReportId(null); setSelectedBranch(''); setOpeningStock(''); setPhysicalStock('');
     setOpeningDebt(''); setOriginalClosingDebt(''); setStaff([{ name: '', actual: '', system: '', credit: '' }]);
     setPeriodStart(today); setPeriodEnd(today);
+    setBranchActual(''); setBranchSystem(''); setBranchCredit('');
   };
 
   const handleEditReport = (report) => {
@@ -176,6 +203,10 @@ export default function Home() {
     setOriginalClosingDebt(report.debt_records?.[0]?.original_closing_debt || '');
     setOpeningDebtDate(report.debt_records?.[0]?.opening_debt_date || today);
     setClosingDebtDate(report.debt_records?.[0]?.closing_debt_date || today);
+
+    setBranchActual(report.branch_actual_sales || '');
+    setBranchSystem(report.branch_system_sales || '');
+    setBranchCredit(report.branch_credit_sales || '');
 
     if (report.sales_records && report.sales_records.length > 0) {
       setStaff(report.sales_records.map(sr => ({
@@ -201,15 +232,16 @@ export default function Home() {
   const fetchDashboardData = async () => {
     setIsLoadingData(true);
     const { data } = await supabase.from('reports').select(`
-      id, status, stock_takes(opening_stock, physical_stock), debt_records(opening_debt, original_closing_debt), sales_records(actual_sales, system_sales, credit_sales)
+      id, status, branch_actual_sales, branch_system_sales, branch_credit_sales, stock_takes(opening_stock, physical_stock), debt_records(opening_debt, original_closing_debt)
     `);
     if (data) {
       let pending = 0, tStockLoss = 0, tAdjDebt = 0;
       data.forEach(r => {
         if (r.status !== 'Approved') pending++;
-        const tAct = r.sales_records?.reduce((s, x) => s + x.actual_sales, 0) || 0;
-        const tSys = r.sales_records?.reduce((s, x) => s + x.system_sales, 0) || 0;
-        const tCre = r.sales_records?.reduce((s, x) => s + x.credit_sales, 0) || 0;
+        
+        const tAct = r.branch_actual_sales || 0;
+        const tSys = r.branch_system_sales || 0;
+        const tCre = r.branch_credit_sales || 0;
         const oStk = r.stock_takes?.[0]?.opening_stock || 0;
         const pStk = r.stock_takes?.[0]?.physical_stock || 0;
         const oDebt = r.debt_records?.[0]?.opening_debt || 0;
@@ -245,16 +277,16 @@ export default function Home() {
   const fetchConsolidated = async () => {
     setIsLoadingData(true);
     const { data } = await supabase.from('reports').select(`
-      id, period_start, period_end, branch_id, status, branches(name), stock_takes(opening_stock, physical_stock), debt_records(opening_debt, original_closing_debt), sales_records(actual_sales, system_sales, credit_sales)
+      id, period_start, period_end, branch_id, status, branch_actual_sales, branch_system_sales, branch_credit_sales, branches(name), stock_takes(opening_stock, physical_stock), debt_records(opening_debt, original_closing_debt)
     `).order('created_at', { ascending: false });
 
     if (data) {
       const grouped = {};
       data.forEach(r => {
         if (!grouped[r.branch_id] || r.status === 'Approved') {
-          const tAct = r.sales_records.reduce((s, x) => s + x.actual_sales, 0);
-          const tSys = r.sales_records.reduce((s, x) => s + x.system_sales, 0);
-          const tCre = r.sales_records.reduce((s, x) => s + x.credit_sales, 0);
+          const tAct = r.branch_actual_sales || 0;
+          const tSys = r.branch_system_sales || 0;
+          const tCre = r.branch_credit_sales || 0;
           const oStk = r.stock_takes?.[0]?.opening_stock || 0;
           const pStk = r.stock_takes?.[0]?.physical_stock || 0;
           const oDebt = r.debt_records?.[0]?.opening_debt || 0;
@@ -281,12 +313,15 @@ export default function Home() {
       const pStk = report.stock_takes?.[0]?.physical_stock || 0;
       const oDebt = report.debt_records?.[0]?.opening_debt || 0;
       const cDebt = report.debt_records?.[0]?.original_closing_debt || 0;
+      
       const staffData = (report.sales_records || []).map(sr => ({
         name: sr.salespeople?.name || '', actual: sr.actual_sales || 0, system: sr.system_sales || 0, credit: sr.credit_sales || 0
       }));
-      const tAct = staffData.reduce((s, x) => s + x.actual, 0);
-      const tSys = staffData.reduce((s, x) => s + x.system, 0);
-      const tCre = staffData.reduce((s, x) => s + x.credit, 0);
+      
+      const tAct = report.branch_actual_sales || staffData.reduce((s, x) => s + x.actual, 0);
+      const tSys = report.branch_system_sales || staffData.reduce((s, x) => s + x.system, 0);
+      const tCre = report.branch_credit_sales || staffData.reduce((s, x) => s + x.credit, 0);
+
       const results = calculateStockAndSales(oStk, pStk, tAct, tSys - tCre);
       const debtResults = calculateDebt(oDebt, cDebt, results.residualStockLoss);
 
@@ -296,7 +331,8 @@ export default function Home() {
         openingStock: oStk, physicalStock: pStk, openingDebt: oDebt, originalClosingDebt: cDebt,
         openingDebtDate: report.debt_records?.[0]?.opening_debt_date || 'N/A',
         closingDebtDate: report.debt_records?.[0]?.closing_debt_date || 'N/A',
-        results, debtResults, staff: staffData
+        results, debtResults, staff: staffData,
+        branchActual: tAct, branchSystem: tSys, branchCredit: tCre
       };
     } else {
       return {
@@ -304,7 +340,8 @@ export default function Home() {
         openingStock: num(openingStock), physicalStock: num(physicalStock),
         openingDebt: num(openingDebt), originalClosingDebt: num(originalClosingDebt),
         openingDebtDate, closingDebtDate, results: stockAndSalesResults, debtResults,
-        staff: staff.map(s => ({ name: s.name || 'Unnamed', actual: num(s.actual), system: num(s.system), credit: num(s.credit) }))
+        staff: staff.map(s => ({ name: s.name || 'Unnamed', actual: num(s.actual), system: num(s.system), credit: num(s.credit) })),
+        branchActual: finalBranchActual, branchSystem: finalBranchSystem, branchCredit: finalBranchCredit
       };
     }
   };
@@ -407,8 +444,19 @@ export default function Home() {
       const adjSys = s.system - s.credit;
       return [s.name, formatKsh(s.actual), formatKsh(s.system), formatKsh(s.credit), formatKsh(adjSys), formatKsh(s.actual - adjSys)];
     });
-    // Add Branch Total
-    salesBody.push(['Branch Total', formatKsh(data.staff.reduce((sum, s) => sum + s.actual, 0)), formatKsh(data.staff.reduce((sum, s) => sum + s.system, 0)), formatKsh(data.staff.reduce((sum, s) => sum + s.credit, 0)), formatKsh(data.staff.reduce((sum, s) => sum + (s.system - s.credit), 0)), formatKsh(data.results.salesVariance)]);
+    
+    // Add Unallocated Gap row if exists
+    const unallocActual = data.branchActual - data.staff.reduce((sum, s) => sum + s.actual, 0);
+    const unallocSystem = data.branchSystem - data.staff.reduce((sum, s) => sum + s.system, 0);
+    const unallocCredit = data.branchCredit - data.staff.reduce((sum, s) => sum + s.credit, 0);
+    
+    if (unallocActual !== 0 || unallocSystem !== 0 || unallocCredit !== 0) {
+      const adjUnalloc = unallocSystem - unallocCredit;
+      salesBody.push(['Unallocated', formatKsh(unallocActual), formatKsh(unallocSystem), formatKsh(unallocCredit), formatKsh(adjUnalloc), formatKsh(unallocActual - adjUnalloc)]);
+    }
+
+    // Add Branch Total row
+    salesBody.push(['Branch Total', formatKsh(data.branchActual), formatKsh(data.branchSystem), formatKsh(data.branchCredit), formatKsh(data.branchSystem - data.branchCredit), formatKsh(data.results.salesVariance)]);
 
     autoTable(doc, {
       startY: doc.lastAutoTable.finalY + 15,
@@ -420,7 +468,10 @@ export default function Home() {
           if (data.cell.text[0].includes('-')) data.cell.styles.textColor = [192, 57, 43];
           else if (data.cell.text[0] !== '-' && data.row.index !== salesBody.length -1) data.cell.styles.textColor = [39, 174, 96];
         }
-        if (data.row.index === salesBody.length - 1) data.cell.styles.fontStyle = 'bold';
+        if (data.row.index === salesBody.length - 1 || data.cell.text[0] === 'Unallocated') {
+          data.cell.styles.fontStyle = 'bold';
+          data.cell.styles.fillColor = [240, 240, 240];
+        }
       }
     });
 
@@ -592,8 +643,31 @@ export default function Home() {
 
             <div>
               <div style={{ padding: '20px', backgroundColor: '#f9f9f9', borderRadius: '8px', marginBottom: '20px', border: '1px solid #ddd' }}>
+                <h3 style={{ marginTop: 0 }}>2. Branch Aggregates (Optional)</h3>
+                <p style={{ fontSize: '12px', color: '#666', marginTop: '-10px', marginBottom: '10px' }}>Leave blank to auto-calculate from salespeople below.</p>
+                <div style={{ display: 'flex', gap: '10px' }}>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Branch Actual Sales</label>
+                    <input type="number" value={branchActual} onChange={e => setBranchActual(e.target.value)} placeholder={totalStaffActual > 0 ? totalStaffActual.toString() : "0"} style={{ width: '100%', padding: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Branch System Sales</label>
+                    <input type="number" value={branchSystem} onChange={e => setBranchSystem(e.target.value)} placeholder={totalStaffSystem > 0 ? totalStaffSystem.toString() : "0"} style={{ width: '100%', padding: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Branch Credit Sales</label>
+                    <input type="number" value={branchCredit} onChange={e => setBranchCredit(e.target.value)} placeholder={totalStaffCredit > 0 ? totalStaffCredit.toString() : "0"} style={{ width: '100%', padding: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+            <div>
+              <div style={{ padding: '20px', backgroundColor: '#f9f9f9', borderRadius: '8px', marginBottom: '20px', border: '1px solid #ddd' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
-                  <h3 style={{ margin: 0 }}>2. Salespeople</h3>
+                  <h3 style={{ margin: 0 }}>3. Salespeople</h3>
                   <div>
                     <label style={{ padding: '8px 12px', backgroundColor: '#4caf50', color: '#fff', borderRadius: '4px', cursor: 'pointer', fontSize: '14px', marginRight: '10px' }}>
                       Import CSV
@@ -770,12 +844,35 @@ export default function Home() {
                       </tr>
                     );
                   })}
+                  
+                  {/* Unallocated Row (Branch vs Individual Gap) */}
+                  {(() => {
+                    const unallocActual = viewingReport.branchActual - viewingReport.staff.reduce((sum, s) => sum + s.actual, 0);
+                    const unallocSystem = viewingReport.branchSystem - viewingReport.staff.reduce((sum, s) => sum + s.system, 0);
+                    const unallocCredit = viewingReport.branchCredit - viewingReport.staff.reduce((sum, s) => sum + s.credit, 0);
+                    if (unallocActual !== 0 || unallocSystem !== 0 || unallocCredit !== 0) {
+                      const adjUnalloc = unallocSystem - unallocCredit;
+                      return (
+                        <tr style={{ backgroundColor: '#fff3cd' }}>
+                          <td style={{ padding: '8px', border: '1px solid #000', fontWeight: 'bold' }}>Unallocated</td>
+                          <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(unallocActual)}</td>
+                          <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(unallocSystem)}</td>
+                          <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(unallocCredit)}</td>
+                          <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(adjUnalloc)}</td>
+                          <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000', color: (unallocActual - adjUnalloc) < 0 ? '#dc3545' : '#28a745', fontWeight: 'bold' }}>{formatKsh(unallocActual - adjUnalloc)}</td>
+                        </tr>
+                      );
+                    }
+                    return null;
+                  })()}
+
+                  {/* Branch Total Row */}
                   <tr style={{ backgroundColor: '#f0f0f0', fontWeight: 'bold' }}>
                     <td style={{ padding: '8px', border: '1px solid #000' }}>Branch Total</td>
-                    <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.staff.reduce((sum, s) => sum + s.actual, 0))}</td>
-                    <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.staff.reduce((sum, s) => sum + s.system, 0))}</td>
-                    <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.staff.reduce((sum, s) => sum + s.credit, 0))}</td>
-                    <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.staff.reduce((sum, s) => sum + (s.system - s.credit), 0))}</td>
+                    <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.branchActual)}</td>
+                    <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.branchSystem)}</td>
+                    <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.branchCredit)}</td>
+                    <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(viewingReport.branchSystem - viewingReport.branchCredit)}</td>
                     <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000', color: viewingReport.results.salesVariance < 0 ? '#dc3545' : '#28a745' }}>{formatKsh(viewingReport.results.salesVariance)}</td>
                   </tr>
                 </tbody>
