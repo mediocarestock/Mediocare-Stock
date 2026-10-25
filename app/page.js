@@ -104,23 +104,24 @@ export default function Home() {
   };
 
   // --- CALCULATIONS ---
-  // Calculate Staff Totals
   const totalStaffActual = staff.reduce((sum, s) => sum + num(s.actual), 0);
   const totalStaffSystem = staff.reduce((sum, s) => sum + num(s.system), 0);
   const totalStaffCredit = staff.reduce((sum, s) => sum + num(s.credit), 0);
 
-  // Determine Branch Totals (Use explicit input if provided, otherwise fallback to staff sum)
+  // Determine Branch Totals (Fallback to staff sums if left blank)
   const finalBranchActual = branchActual !== '' ? num(branchActual) : totalStaffActual;
   const finalBranchSystem = branchSystem !== '' ? num(branchSystem) : totalStaffSystem;
   const finalBranchCredit = branchCredit !== '' ? num(branchCredit) : totalStaffCredit;
 
+  // Adjusted System Sales = System - Credit
   const adjustedSystemSales = finalBranchSystem - finalBranchCredit;
   
-  // Unallocated Gap (Branch vs Individual)
+  // Unallocated Gap
   const unallocatedActual = finalBranchActual - totalStaffActual;
   const unallocatedSystem = finalBranchSystem - totalStaffSystem;
   const unallocatedCredit = finalBranchCredit - totalStaffCredit;
 
+  // Core Math
   const stockAndSalesResults = calculateStockAndSales(num(openingStock), num(physicalStock), finalBranchActual, adjustedSystemSales);
   const debtResults = calculateDebt(num(openingDebt), num(originalClosingDebt), stockAndSalesResults.residualStockLoss);
   const branchName = branches.find(b => b.id === selectedBranch)?.name || '';
@@ -306,7 +307,7 @@ export default function Home() {
     setIsLoadingData(false);
   };
 
-  // --- SHARED DATA BUILDER FOR PDF & MODAL ---
+  // --- SHARED DATA BUILDER ---
   const buildReportData = (isHistory = false, report = null) => {
     if (isHistory) {
       const oStk = report.stock_takes?.[0]?.opening_stock || 0;
@@ -344,6 +345,46 @@ export default function Home() {
         branchActual: finalBranchActual, branchSystem: finalBranchSystem, branchCredit: finalBranchCredit
       };
     }
+  };
+
+  // --- SMART NOTES GENERATOR ---
+  const generateNotes = (data) => {
+    let notes = [];
+    
+    // 1. Sales & Stock Offset
+    if (data.results.salesVariance > 0 && data.results.grossStockShortage > 0) {
+      if (data.results.remainingSalesSurplus > 0) {
+        notes.push(`The branch recorded a positive sales variance (surplus) of Ksh ${formatKsh(data.results.salesVariance)}. This surplus was applied to fully offset the stock shortage of Ksh ${formatKsh(data.results.grossStockShortage)}, leaving an unreconciled sales surplus of Ksh ${formatKsh(data.results.remainingSalesSurplus)}.`);
+      } else {
+        notes.push(`The branch recorded a positive sales variance of Ksh ${formatKsh(data.results.salesVariance)}. This was applied against the stock shortage of Ksh ${formatKsh(data.results.grossStockShortage)}, reducing the unreconciled residual stock loss to Ksh ${formatKsh(data.results.residualStockLoss)}.`);
+      }
+    } else if (data.results.salesVariance > 0 && data.results.grossStockShortage === 0) {
+      notes.push(`The branch recorded a positive sales variance of Ksh ${formatKsh(data.results.salesVariance)} with no stock shortage. This represents unrecorded cash or timing differences.`);
+    } else if (data.results.salesVariance <= 0 && data.results.grossStockShortage > 0) {
+      notes.push(`No positive sales variance is available to offset the stock shortage. The branch recorded a negative sales variance (cash shortage) of Ksh ${formatKsh(Math.abs(data.results.salesVariance))}, resulting in a full residual stock loss of Ksh ${formatKsh(data.results.residualStockLoss)}.`);
+    }
+
+    // 2. Unallocated Gap
+    const unallocActual = data.branchActual - data.staff.reduce((sum, s) => sum + s.actual, 0);
+    if (Math.abs(unallocActual) > 0) {
+      notes.push(`An unallocated sales gap of Ksh ${formatKsh(unallocActual)} exists between the branch aggregate actual sales and the sum of individual salesperson actual sales. This requires further investigation.`);
+    }
+
+    // 3. Debt Adjustment
+    if (data.results.residualStockLoss > 0) {
+      notes.push(`The residual stock loss of Ksh ${formatKsh(data.results.residualStockLoss)} was added to the closing debt, increasing the original closing debt of Ksh ${formatKsh(data.originalClosingDebt)} to an adjusted closing debt of Ksh ${formatKsh(data.debtResults.adjustedClosingDebt)}.`);
+    } else {
+      notes.push(`No residual stock loss was added to the debt. The adjusted closing debt remains at Ksh ${formatKsh(data.debtResults.adjustedClosingDebt)}.`);
+    }
+
+    // 4. Final Debt Movement
+    if (data.debtResults.netDebtReduction >= 0) {
+      notes.push(`Overall, the branch achieved a net debt reduction of Ksh ${formatKsh(data.debtResults.netDebtReduction)} (${data.debtResults.debtReductionPercentage?.toFixed(2)}%).`);
+    } else {
+      notes.push(`Overall, the branch recorded an adverse net debt increase of Ksh ${formatKsh(Math.abs(data.debtResults.netDebtReduction))}.`);
+    }
+
+    return notes;
   };
 
   // --- PDF ENGINE ---
@@ -392,30 +433,14 @@ export default function Home() {
     doc.setFontSize(9); doc.setFont('helvetica', 'normal');
     doc.text(`Period: ${data.periodStart} to ${data.periodEnd}`, pageWidth / 2, 34, { align: 'center' });
 
-    // NARRATIVE BUILDER
-    let narrative = [];
-    if (data.results.salesVariance > 0) {
-      const sortedStaff = [...data.staff].sort((a, b) => (b.actual - (b.system - b.credit)) - (a.actual - (a.system - a.credit)));
-      const top1 = sortedStaff[0] ? `${sortedStaff[0].name} (${Math.round(((sortedStaff[0].actual - (sortedStaff[0].system - sortedStaff[0].credit)) / data.results.salesVariance) * 100)}%)` : '';
-      const top2 = sortedStaff[1] ? `${sortedStaff[1].name} (${Math.round(((sortedStaff[1].actual - (sortedStaff[1].system - sortedStaff[1].credit)) / data.results.salesVariance) * 100)}%)` : '';
-      
-      narrative.push(`• Credit-adjusted sales surplus: Ksh ${formatKsh(data.results.salesVariance)} (${data.results.salesVariancePercentage?.toFixed(2)}%).`);
-      if (top1) narrative.push(`• Variance Drivers: ${top1}, ${top2}.`);
-      narrative.push(`• Stock loss: Ksh ${formatKsh(data.results.grossStockShortage)} (${data.results.stockVariancePercentage?.toFixed(2)}%); fully offset by sales surplus.`);
-      narrative.push(`• Residual surplus after stock-loss offset: Ksh ${formatKsh(data.results.remainingSalesSurplus)}.`);
-    } else {
-      narrative.push(`• Sales shortage: Ksh ${formatKsh(Math.abs(data.results.salesVariance))}. System sales exceeded actual cash.`);
-      narrative.push(`• Stock loss: Ksh ${formatKsh(data.results.grossStockShortage)}. Residual loss to carry forward: Ksh ${formatKsh(data.results.residualStockLoss)}.`);
-    }
-    narrative.push(`• Debt reduced by Ksh ${formatKsh(data.debtResults.netDebtReduction)} (${data.debtResults.debtReductionPercentage?.toFixed(2)}%) to Ksh ${formatKsh(data.debtResults.adjustedClosingDebt)}.`);
-
     // 1. EXEC SUMMARY
+    const notes = generateNotes(data);
     doc.setFontSize(11); doc.setFont('helvetica', 'bold');
-    doc.text('1. Executive Summary', 14, 45);
+    doc.text('1. Executive Summary & Notes', 14, 45);
     doc.setFontSize(9); doc.setFont('helvetica', 'normal');
     let summaryY = 52;
-    narrative.forEach(text => {
-      const splitText = doc.splitTextToSize(text, pageWidth - 28);
+    notes.forEach(text => {
+      const splitText = doc.splitTextToSize(`• ${text}`, pageWidth - 28);
       doc.text(splitText, 14, summaryY); summaryY += (splitText.length * 5) + 2;
     });
 
@@ -428,10 +453,10 @@ export default function Home() {
       body: [
         ['Stock before stock take', formatKsh(data.openingStock), 'Opening'],
         ['Stock after stock take', formatKsh(data.physicalStock), 'Physical'],
-        ['Stock Variance', formatKsh(data.results.grossStockVariance), `${(data.results.stockVariancePercentage || 0).toFixed(2)}% of opening`],
-        ['Sales Surplus/Shortage', formatKsh(data.results.salesVariance), 'Credit-adjusted'],
+        ['Gross Stock Variance', formatKsh(data.results.grossStockVariance), `${(data.results.stockVariancePercentage || 0).toFixed(2)}% of opening`],
+        ['Positive Sales Variance', formatKsh(data.results.salesVariance), 'Credit-adjusted'],
         ['Less: Applied to offset', `(${formatKsh(data.results.salesOffset)})`, 'Transferred'],
-        ['Residual Stock Variance', formatKsh(data.results.residualStockLoss), 'Added to debt'],
+        ['Residual Stock Loss', formatKsh(data.results.residualStockLoss), 'Added to debt'],
       ],
       theme: 'grid', headStyles: { fillColor: [44, 62, 80] }, styles: { fontSize: 8 }
     });
@@ -445,7 +470,6 @@ export default function Home() {
       return [s.name, formatKsh(s.actual), formatKsh(s.system), formatKsh(s.credit), formatKsh(adjSys), formatKsh(s.actual - adjSys)];
     });
     
-    // Add Unallocated Gap row if exists
     const unallocActual = data.branchActual - data.staff.reduce((sum, s) => sum + s.actual, 0);
     const unallocSystem = data.branchSystem - data.staff.reduce((sum, s) => sum + s.system, 0);
     const unallocCredit = data.branchCredit - data.staff.reduce((sum, s) => sum + s.credit, 0);
@@ -455,7 +479,6 @@ export default function Home() {
       salesBody.push(['Unallocated', formatKsh(unallocActual), formatKsh(unallocSystem), formatKsh(unallocCredit), formatKsh(adjUnalloc), formatKsh(unallocActual - adjUnalloc)]);
     }
 
-    // Add Branch Total row
     salesBody.push(['Branch Total', formatKsh(data.branchActual), formatKsh(data.branchSystem), formatKsh(data.branchCredit), formatKsh(data.branchSystem - data.branchCredit), formatKsh(data.results.salesVariance)]);
 
     autoTable(doc, {
@@ -545,6 +568,7 @@ export default function Home() {
   return (
     <main style={{ maxWidth: '1200px', margin: '40px auto', fontFamily: 'system-ui', padding: '0 20px' }}>
       
+      {/* HEADER NAVIGATION */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '2px solid #333', paddingBottom: '10px', marginBottom: '20px' }}>
         <div>
           <h1 style={{ margin: 0 }}>Mediocare System</h1>
@@ -559,6 +583,7 @@ export default function Home() {
         </div>
       </div>
 
+      {/* DASHBOARD TAB */}
       {activeTab === 'dashboard' && (
         <div>
           <h2 style={{ marginBottom: '20px' }}>Company Overview</h2>
@@ -583,6 +608,7 @@ export default function Home() {
         </div>
       )}
 
+      {/* CREATE TAB */}
       {activeTab === 'create' && (
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
@@ -609,26 +635,34 @@ export default function Home() {
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+            
+            {/* LEFT COLUMN: STOCK & DEBT */}
             <div>
               <div style={{ padding: '20px', backgroundColor: '#f9f9f9', borderRadius: '8px', marginBottom: '20px', border: '1px solid #ddd' }}>
-                <h3 style={{ marginTop: 0 }}>1. Financial Data</h3>
-                <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Opening Stock (Ksh)</label>
-                <input type="number" value={openingStock} onChange={e => setOpeningStock(e.target.value)} style={{ width: '100%', padding: '10px', marginBottom: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
-                <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Physical Stock (Ksh)</label>
-                <input type="number" value={physicalStock} onChange={e => setPhysicalStock(e.target.value)} style={{ width: '100%', padding: '10px', marginBottom: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
-                
+                <h3 style={{ marginTop: 0 }}>1. Stock & Debt Core</h3>
                 <div style={{ display: 'flex', gap: '10px' }}>
                   <div style={{ flex: 1 }}>
+                    <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Opening Stock (Ksh)</label>
+                    <input type="number" value={openingStock} onChange={e => setOpeningStock(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Physical Stock (Ksh)</label>
+                    <input type="number" value={physicalStock} onChange={e => setPhysicalStock(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
+                  </div>
+                </div>
+                
+                <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
+                  <div style={{ flex: 1 }}>
                     <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Opening Debt Date</label>
-                    <input type="date" value={openingDebtDate} onChange={e => setOpeningDebtDate(e.target.value)} style={{ width: '100%', padding: '10px', marginBottom: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
+                    <input type="date" value={openingDebtDate} onChange={e => setOpeningDebtDate(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
                   </div>
                   <div style={{ flex: 1 }}>
                     <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Opening Debt (Ksh)</label>
-                    <input type="number" value={openingDebt} onChange={e => setOpeningDebt(e.target.value)} style={{ width: '100%', padding: '10px', marginBottom: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
+                    <input type="number" value={openingDebt} onChange={e => setOpeningDebt(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
                   </div>
                 </div>
 
-                <div style={{ display: 'flex', gap: '10px' }}>
+                <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
                   <div style={{ flex: 1 }}>
                     <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Closing Debt Date</label>
                     <input type="date" value={closingDebtDate} onChange={e => setClosingDebtDate(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
@@ -639,12 +673,10 @@ export default function Home() {
                   </div>
                 </div>
               </div>
-            </div>
 
-            <div>
-              <div style={{ padding: '20px', backgroundColor: '#f9f9f9', borderRadius: '8px', marginBottom: '20px', border: '1px solid #ddd' }}>
-                <h3 style={{ marginTop: 0 }}>2. Branch Aggregates (Optional)</h3>
-                <p style={{ fontSize: '12px', color: '#666', marginTop: '-10px', marginBottom: '10px' }}>Leave blank to auto-calculate from salespeople below.</p>
+              <div style={{ padding: '20px', backgroundColor: '#eef2f5', borderRadius: '8px', marginBottom: '20px', border: '1px solid #ccc' }}>
+                <h3 style={{ marginTop: 0 }}>2. Branch Reconciliation Totals</h3>
+                <p style={{ fontSize: '12px', color: '#666', marginTop: '-10px', marginBottom: '10px' }}>Enter Branch Aggregates. (If blank, auto-sums from salespeople).</p>
                 <div style={{ display: 'flex', gap: '10px' }}>
                   <div style={{ flex: 1 }}>
                     <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Branch Actual Sales</label>
@@ -661,13 +693,12 @@ export default function Home() {
                 </div>
               </div>
             </div>
-          </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+            {/* RIGHT COLUMN: SALESPEOPLE */}
             <div>
               <div style={{ padding: '20px', backgroundColor: '#f9f9f9', borderRadius: '8px', marginBottom: '20px', border: '1px solid #ddd' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
-                  <h3 style={{ margin: 0 }}>3. Salespeople</h3>
+                  <h3 style={{ margin: 0 }}>3. Individual Salespeople</h3>
                   <div>
                     <label style={{ padding: '8px 12px', backgroundColor: '#4caf50', color: '#fff', borderRadius: '4px', cursor: 'pointer', fontSize: '14px', marginRight: '10px' }}>
                       Import CSV
@@ -709,10 +740,12 @@ export default function Home() {
                 </button>
               </div>
             </div>
+
           </div>
         </div>
       )}
 
+      {/* HISTORY TAB */}
       {activeTab === 'history' && (
         <div style={{ padding: '20px', backgroundColor: '#f9f9f9', borderRadius: '8px', border: '1px solid #ddd' }}>
           <h2 style={{ marginTop: 0 }}>Saved Reports</h2>
@@ -782,22 +815,12 @@ export default function Home() {
                 <p style={{ margin: 0, fontSize: '14px' }}>Reporting Period: {viewingReport.periodStart} to {viewingReport.periodEnd}</p>
               </div>
 
-              {/* SECTION 1: EXEC SUMMARY */}
-              <h3 style={{ fontSize: '16px', borderBottom: '2px solid #000', paddingBottom: '5px', marginTop: '30px' }}>1. Executive Summary</h3>
+              {/* SECTION 1: EXEC SUMMARY & NOTES */}
+              <h3 style={{ fontSize: '16px', borderBottom: '2px solid #000', paddingBottom: '5px', marginTop: '30px' }}>1. Executive Summary & Notes</h3>
               <ul style={{ fontSize: '14px', lineHeight: '1.6', paddingLeft: '20px' }}>
-                {viewingReport.results.salesVariance > 0 ? (
-                  <>
-                    <li style={{ marginBottom: '8px' }}>Credit-adjusted sales surplus: <strong>Ksh {formatKsh(viewingReport.results.salesVariance)}</strong> ({viewingReport.results.salesVariancePercentage?.toFixed(2)}%).</li>
-                    <li style={{ marginBottom: '8px' }}>Stock loss: <strong>Ksh {formatKsh(viewingReport.results.grossStockShortage)}</strong> ({viewingReport.results.stockVariancePercentage?.toFixed(2)}%); fully offset by sales surplus.</li>
-                    <li style={{ marginBottom: '8px' }}>Residual surplus after stock-loss offset: <strong>Ksh {formatKsh(viewingReport.results.remainingSalesSurplus)}</strong>.</li>
-                  </>
-                ) : (
-                  <>
-                    <li style={{ marginBottom: '8px' }}>Sales shortage: <strong>Ksh {formatKsh(Math.abs(viewingReport.results.salesVariance))}</strong>. System sales exceeded actual cash.</li>
-                    <li style={{ marginBottom: '8px' }}>Stock loss: <strong>Ksh {formatKsh(viewingReport.results.grossStockShortage)}</strong>. Residual loss to carry forward: <strong>Ksh {formatKsh(viewingReport.results.residualStockLoss)}</strong>.</li>
-                  </>
-                )}
-                <li style={{ marginBottom: '8px' }}>Debt reduced by <strong>Ksh {formatKsh(viewingReport.debtResults.netDebtReduction)}</strong> to <strong>Ksh {formatKsh(viewingReport.debtResults.adjustedClosingDebt)}</strong>.</li>
+                {generateNotes(viewingReport).map((note, idx) => (
+                  <li key={idx} style={{ marginBottom: '8px' }}>{note}</li>
+                ))}
               </ul>
 
               {/* SECTION 2: STOCK */}
@@ -845,7 +868,7 @@ export default function Home() {
                     );
                   })}
                   
-                  {/* Unallocated Row (Branch vs Individual Gap) */}
+                  {/* Unallocated Row */}
                   {(() => {
                     const unallocActual = viewingReport.branchActual - viewingReport.staff.reduce((sum, s) => sum + s.actual, 0);
                     const unallocSystem = viewingReport.branchSystem - viewingReport.staff.reduce((sum, s) => sum + s.system, 0);
@@ -901,6 +924,7 @@ export default function Home() {
         </div>
       )}
 
+      {/* CONSOLIDATED TAB */}
       {activeTab === 'consolidated' && (
         <div style={{ padding: '20px', backgroundColor: '#f9f9f9', borderRadius: '8px', border: '1px solid #ddd' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
