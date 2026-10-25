@@ -17,7 +17,7 @@ export default function Home() {
   const [authLoading, setAuthLoading] = useState(true);
 
   // --- UI STATE ---
-  const [activeTab, setActiveTab] = useState('create'); // 'create', 'history', 'consolidated'
+  const [activeTab, setActiveTab] = useState('create'); 
   const [branches, setBranches] = useState([]);
   const [isSaving, setIsSaving] = useState(false);
 
@@ -67,6 +67,7 @@ export default function Home() {
   // --- HELPERS ---
   const num = (val) => parseFloat(val) || 0;
   const formatKsh = (amount) => new Intl.NumberFormat('en-KE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount);
+  const formatNum = (amount) => new Intl.NumberFormat('en-KE', { maximumFractionDigits: 0 }).format(amount);
 
   // --- CSV UPLOAD ---
   const handleCSVUpload = (e) => {
@@ -151,6 +152,7 @@ export default function Home() {
 
     if (data) {
       const grouped = {};
+      // Only take the LATEST report per branch to avoid double counting
       data.forEach(r => {
         if (!grouped[r.branch_id]) {
           const tAct = r.sales_records.reduce((s, x) => s + x.actual_sales, 0);
@@ -175,6 +177,41 @@ export default function Home() {
       setConsolidatedData(Object.values(grouped));
     }
     setIsLoadingData(false);
+  };
+
+  // --- PDF CHART ENGINE ---
+  const drawBarChart = (doc, startX, startY, width, height, data, title) => {
+    let maxVal = 0, minVal = 0;
+    data.forEach(d => {
+      if (d.val1 > maxVal) maxVal = d.val1; if (d.val1 < minVal) minVal = d.val1;
+    });
+    const range = Math.max(maxVal - minVal, 1);
+    maxVal += range * 0.15; minVal -= range * 0.15;
+    const zeroLineY = startY + height - ((0 - minVal) / (maxVal - minVal)) * height;
+
+    doc.setFontSize(9); doc.setFont('helvetica', 'bold');
+    doc.text(title, startX + width / 2, startY - 5, { align: 'center' });
+    doc.setDrawColor(150); doc.setLineWidth(0.5);
+    doc.line(startX, startY, startX, startY + height); doc.line(startX, zeroLineY, startX + width, zeroLineY);
+
+    doc.setFontSize(7); doc.setFont('helvetica', 'normal'); doc.setTextColor(100);
+    doc.text(formatNum(maxVal), startX - 2, startY + 4, { align: 'right' });
+    doc.text('0', startX - 2, zeroLineY + 2, { align: 'right' });
+    if (minVal < 0) doc.text(formatNum(minVal), startX - 2, startY + height, { align: 'right' });
+
+    const barGroupWidth = width / data.length; const barWidth = (barGroupWidth * 0.7);
+    data.forEach((d, i) => {
+      const groupX = startX + (i * barGroupWidth) + (barGroupWidth * 0.15);
+      const h1 = ((d.val1 - 0) / (maxVal - minVal)) * height; const y1 = zeroLineY - h1;
+      
+      // Color code: Red for negative, Blue for positive
+      doc.setFillColor(d.val1 >= 0 ? 41 : 192, d.val1 >= 0 ? 128 : 57, d.val1 >= 0 ? 185 : 43); 
+      doc.rect(groupX, h1 > 0 ? y1 : zeroLineY, barWidth, Math.abs(h1), 'F');
+
+      doc.setFontSize(6); doc.setTextColor(0);
+      if (d.val1 !== 0) doc.text(formatNum(d.val1), groupX + (barWidth/2), h1 > 0 ? y1 - 2 : y1 + Math.abs(h1) + 4, { align: 'center' });
+      doc.setFontSize(7); doc.text(d.label.substring(0, 8), groupX + barWidth/2, startY + height + 4, { align: 'center' });
+    });
   };
 
   // --- PDF GENERATORS ---
@@ -207,17 +244,32 @@ export default function Home() {
     generateBranchPDF({ branchName, results: stockAndSalesResults, debtResults });
   };
 
+  // --- UPGRADED CONSOLIDATED PDF ---
   const generateConsolidatedPDF = () => {
+    if(consolidatedData.length === 0) return alert("No data available to consolidate.");
+    
     const doc = new jsPDF('landscape');
     const pageWidth = doc.internal.pageSize.getWidth();
     
+    // HEADER
     doc.setFontSize(16); doc.setFont('helvetica', 'bold');
     doc.text('MEDIOCARE PHARMACEUTICALS LTD', pageWidth / 2, 20, { align: 'center' });
     doc.setFontSize(12);
     doc.text('COMPANY-WIDE CONSOLIDATED FINANCIAL REPORT', pageWidth / 2, 28, { align: 'center' });
     doc.setFontSize(9); doc.setFont('helvetica', 'normal');
-    doc.text(`Generated on: ${new Date().toLocaleString()}`, pageWidth / 2, 34, { align: 'center' });
+    doc.text(`Generated on: ${new Date().toLocaleString()} | Base Currency: KES`, pageWidth / 2, 34, { align: 'center' });
 
+    // CALCULATE TOTALS
+    const totals = consolidatedData.reduce((acc, curr) => {
+      acc.openingDebt += curr.openingDebt;
+      acc.adjClosingDebt += curr.adjClosingDebt;
+      acc.netReduction += curr.netReduction;
+      acc.stockLoss += curr.stockLoss;
+      acc.salesVariance += curr.salesVariance;
+      return acc;
+    }, { openingDebt: 0, adjClosingDebt: 0, netReduction: 0, stockLoss: 0, salesVariance: 0 });
+
+    // TABLE DATA
     const tableBody = consolidatedData.map(d => [
       d.name, d.period, formatKsh(d.openingDebt), formatKsh(d.adjClosingDebt), 
       formatKsh(d.netReduction), formatKsh(d.stockLoss), formatKsh(d.salesVariance)
@@ -227,10 +279,39 @@ export default function Home() {
       startY: 45,
       head: [['Branch', 'Period', 'Opening Debt', 'Adj. Closing Debt', 'Net Reduction', 'Stock Loss', 'Sales Variance']],
       body: tableBody,
+      foot: [['GRAND TOTALS', '-', formatKsh(totals.openingDebt), formatKsh(totals.adjClosingDebt), formatKsh(totals.netReduction), formatKsh(totals.stockLoss), formatKsh(totals.salesVariance)]],
       theme: 'grid', 
       headStyles: { fillColor: [44, 62, 80] },
-      styles: { fontSize: 8 }
+      footStyles: { fillColor: [0, 0, 0], textColor: [255, 255, 255], fontStyle: 'bold' },
+      styles: { fontSize: 8 },
+      didParseCell: function (data) {
+        if (data.section === 'body' && data.column.index === 4) {
+          if (data.cell.text[0].includes('-')) data.cell.styles.textColor = [192, 57, 43];
+        }
+      }
     });
+
+    // ANALYSIS TEXT
+    const highestStockLoss = [...consolidatedData].sort((a, b) => b.stockLoss - a.stockLoss)[0];
+    const highestSalesVar = [...consolidatedData].sort((a, b) => b.salesVariance - a.salesVariance)[0];
+    
+    let textY = doc.lastAutoTable.finalY + 10;
+    doc.setFontSize(10); doc.setFont('helvetica', 'bold'); doc.setTextColor(0);
+    doc.text('Automated Head Office Analysis:', 14, textY);
+    
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9);
+    textY += 6;
+    doc.text(`• Total Company Stock Loss: Ksh ${formatKsh(totals.stockLoss)}`, 14, textY);
+    textY += 5;
+    doc.text(`• Highest Stock Loss Branch: ${highestStockLoss.name} (Ksh ${formatKsh(highestStockLoss.stockLoss)})`, 14, textY);
+    textY += 5;
+    doc.text(`• Highest Sales Variance Branch: ${highestSalesVar.name} (Ksh ${formatKsh(highestSalesVar.salesVariance)})`, 14, textY);
+
+    // CHART
+    const chartData = consolidatedData.slice(0, 12).map(d => ({ label: d.name, val1: d.netReduction }));
+    if(chartData.length > 0) {
+      drawBarChart(doc, 14, textY + 25, pageWidth - 28, 50, chartData, 'Net Debt Reduction by Branch (Positive = Good, Negative = Adverse)');
+    }
 
     doc.save(`Company_Consolidated_Report.pdf`);
   };
