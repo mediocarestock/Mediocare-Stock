@@ -23,6 +23,11 @@ export default function Home() {
   const [isSaving, setIsSaving] = useState(false);
   const [viewingReport, setViewingReport] = useState(null);
 
+  // --- SETTINGS STATE ---
+  const [deductCredit, setDeductCredit] = useState(true);
+  const [addLossToDebt, setAddLossToDebt] = useState(true);
+  const [newBranchName, setNewBranchName] = useState('');
+
   // --- DASHBOARD STATE ---
   const [dashboardStats, setDashboardStats] = useState({
     totalBranches: 17, pendingReports: 0, totalStockLoss: 0, totalAdjustedDebt: 0
@@ -56,6 +61,9 @@ export default function Home() {
   // Salespeople
   const [staff, setStaff] = useState([{ name: '', actual: '', system: '', credit: '' }]);
 
+  // Corrective Actions
+  const [actions, setActions] = useState([{ finding: '', amount: '', actionRequired: '', responsible: '', deadline: '', status: 'Pending' }]);
+
   // --- HISTORY & CONSOLIDATED STATE ---
   const [historicalReports, setHistoricalReports] = useState([]);
   const [consolidatedData, setConsolidatedData] = useState([]);
@@ -80,8 +88,17 @@ export default function Home() {
     if (data && data.role) setUserRole(data.role);
   };
 
+  const fetchSettings = async () => {
+    const { data } = await supabase.from('app_settings').select('*').eq('id', 1).single();
+    if (data) {
+      setDeductCredit(data.deduct_credit_sales);
+      setAddLossToDebt(data.add_residual_loss_to_debt);
+    }
+  };
+
   useEffect(() => {
     if (session) {
+      fetchSettings();
       supabase.from('branches').select('*').order('name').then(({ data }) => {
         if (data) {
           setBranches(data);
@@ -138,10 +155,11 @@ export default function Home() {
   const finalBranchSystem = branchSystem !== '' ? num(branchSystem) : totalStaffSystem;
   const finalBranchCredit = branchCredit !== '' ? num(branchCredit) : totalStaffCredit;
 
-  const adjustedSystemSales = finalBranchSystem - finalBranchCredit;
-  
+  const adjustedSystemSales = deductCredit ? (finalBranchSystem - finalBranchCredit) : finalBranchSystem;
   const stockAndSalesResults = calculateStockAndSales(num(openingStock), num(physicalStock), finalBranchActual, adjustedSystemSales);
-  const debtResults = calculateDebt(num(openingDebt), num(originalClosingDebt), stockAndSalesResults.residualStockLoss);
+  const debtLossToAdd = addLossToDebt ? stockAndSalesResults.residualStockLoss : 0;
+  const debtResults = calculateDebt(num(openingDebt), num(originalClosingDebt), debtLossToAdd);
+  
   const branchName = branches.find(b => b.id === selectedBranch)?.name || '';
 
   // --- SAVE / UPDATE / DELETE DATABASE ---
@@ -161,6 +179,7 @@ export default function Home() {
         await supabase.from('stock_takes').delete().eq('report_id', editingReportId);
         await supabase.from('debt_records').delete().eq('report_id', editingReportId);
         await supabase.from('sales_records').delete().eq('report_id', editingReportId);
+        await supabase.from('corrective_actions').delete().eq('report_id', editingReportId);
       } else {
         const { data: reportData, error: reportError } = await supabase.from('reports').insert({ ...reportPayload, status: 'Draft' }).select().single();
         if (reportError) throw reportError;
@@ -168,7 +187,7 @@ export default function Home() {
       }
       
       await supabase.from('stock_takes').insert({ report_id: reportId, opening_stock: num(openingStock), physical_stock: num(physicalStock), stock_date: today, valuation_date: periodStart, physical_count_date: periodEnd });
-      await supabase.from('debt_records').insert({ report_id: reportId, opening_debt: num(openingDebt), original_closing_debt: num(originalClosingDebt), residual_stock_loss_added: stockAndSalesResults.residualStockLoss, opening_debt_date: openingDebtDate, closing_debt_date: closingDebtDate });
+      await supabase.from('debt_records').insert({ report_id: reportId, opening_debt: num(openingDebt), original_closing_debt: num(originalClosingDebt), residual_stock_loss_added: debtLossToAdd, opening_debt_date: openingDebtDate, closing_debt_date: closingDebtDate });
 
       for (const person of staff) {
         if (!person.name) continue;
@@ -179,6 +198,15 @@ export default function Home() {
           spId = newSp.id;
         }
         await supabase.from('sales_records').insert({ report_id: reportId, salesperson_id: spId, actual_sales: num(person.actual), system_sales: num(person.system), credit_sales: num(person.credit) });
+      }
+
+      // Save Corrective Actions
+      for (const act of actions) {
+        if (!act.finding) continue;
+        await supabase.from('corrective_actions').insert({
+          report_id: reportId, finding: act.finding, amount: num(act.amount), action_required: act.actionRequired,
+          responsible_person: act.responsible, deadline: act.deadline || null, status: act.status
+        });
       }
       
       alert(editingReportId ? 'Report updated successfully!' : 'Report saved successfully!');
@@ -204,10 +232,38 @@ export default function Home() {
     else { alert("Report Approved."); fetchHistory(); }
   };
 
+  const handleAddBranch = async () => {
+    if(!newBranchName) return alert("Enter a branch name.");
+    const { error } = await supabase.from('branches').insert({ name: newBranchName });
+    if(error) alert("Error: " + error.message);
+    else {
+      alert("Branch added successfully.");
+      setNewBranchName('');
+      supabase.from('branches').select('*').order('name').then(({ data }) => setBranches(data));
+    }
+  };
+
+  const toggleBranchStatus = async (id, currentStatus) => {
+    const { error } = await supabase.from('branches').update({ is_active: !currentStatus }).eq('id', id);
+    if(error) alert("Error: " + error.message);
+    else supabase.from('branches').select('*').order('name').then(({ data }) => setBranches(data));
+  };
+
+  const handleUpdateSettings = async (key, value) => {
+    const { error } = await supabase.from('app_settings').update({ [key]: value }).eq('id', 1);
+    if(error) alert("Error updating settings: " + error.message);
+    else {
+      if(key === 'deduct_credit_sales') setDeductCredit(value);
+      if(key === 'add_residual_loss_to_debt') setAddLossToDebt(value);
+      alert("Policy updated successfully!");
+    }
+  };
+
   const resetForm = () => {
     setEditingReportId(null); setSelectedBranch(''); setOpeningStock(''); setPhysicalStock('');
     setOpeningDebt(''); setOriginalClosingDebt(''); setStaff([{ name: '', actual: '', system: '', credit: '' }]);
     setPeriodStart(today); setPeriodEnd(today); setBranchActual(''); setBranchSystem(''); setBranchCredit(''); setPrevClosingStock('');
+    setActions([{ finding: '', amount: '', actionRequired: '', responsible: '', deadline: '', status: 'Pending' }]);
   };
 
   const handleEditReport = (report) => {
@@ -222,6 +278,13 @@ export default function Home() {
     if (report.sales_records && report.sales_records.length > 0) {
       setStaff(report.sales_records.map(sr => ({ name: sr.salespeople?.name || '', actual: sr.actual_sales || '', system: sr.system_sales || '', credit: sr.credit_sales || '' })));
     } else { setStaff([{ name: '', actual: '', system: '', credit: '' }]); }
+    
+    if (report.corrective_actions && report.corrective_actions.length > 0) {
+      setActions(report.corrective_actions.map(a => ({ finding: a.finding, amount: a.amount, actionRequired: a.action_required, responsible: a.responsible_person, deadline: a.deadline, status: a.status })));
+    } else {
+      setActions([{ finding: '', amount: '', actionRequired: '', responsible: '', deadline: '', status: 'Pending' }]);
+    }
+
     setActiveTab('create');
   };
 
@@ -233,8 +296,9 @@ export default function Home() {
       let pending = 0, tStockLoss = 0, tAdjDebt = 0;
       data.forEach(r => {
         if (r.status !== 'Approved') pending++;
-        const res = calculateStockAndSales(r.stock_takes?.[0]?.opening_stock || 0, r.stock_takes?.[0]?.physical_stock || 0, r.branch_actual_sales || 0, (r.branch_system_sales || 0) - (r.branch_credit_sales || 0));
-        const db = calculateDebt(r.debt_records?.[0]?.opening_debt || 0, r.debt_records?.[0]?.original_closing_debt || 0, res.residualStockLoss);
+        const adjSys = deductCredit ? (r.branch_system_sales || 0) - (r.branch_credit_sales || 0) : (r.branch_system_sales || 0);
+        const res = calculateStockAndSales(r.stock_takes?.[0]?.opening_stock || 0, r.stock_takes?.[0]?.physical_stock || 0, r.branch_actual_sales || 0, adjSys);
+        const db = calculateDebt(r.debt_records?.[0]?.opening_debt || 0, r.debt_records?.[0]?.original_closing_debt || 0, addLossToDebt ? res.residualStockLoss : 0);
         tStockLoss += res.residualStockLoss; tAdjDebt += db.adjustedClosingDebt;
       });
       setDashboardStats(prev => ({ ...prev, pendingReports: pending, totalStockLoss: tStockLoss, totalAdjustedDebt: tAdjDebt }));
@@ -251,7 +315,8 @@ export default function Home() {
       const { data: st } = await supabase.from('stock_takes').select('*').eq('report_id', r.id);
       const { data: dr } = await supabase.from('debt_records').select('*').eq('report_id', r.id);
       const { data: sr } = await supabase.from('sales_records').select('*, salespeople(name)').eq('report_id', r.id);
-      fullReports.push({ ...r, stock_takes: st || [], debt_records: dr || [], sales_records: sr || [] });
+      const { data: ca } = await supabase.from('corrective_actions').select('*').eq('report_id', r.id);
+      fullReports.push({ ...r, stock_takes: st || [], debt_records: dr || [], sales_records: sr || [], corrective_actions: ca || [] });
     }
     setHistoricalReports(fullReports);
     setIsLoadingData(false);
@@ -264,8 +329,9 @@ export default function Home() {
       const grouped = {};
       data.forEach(r => {
         if (!grouped[r.branch_id] || r.status === 'Approved') {
-          const results = calculateStockAndSales(r.stock_takes?.[0]?.opening_stock || 0, r.stock_takes?.[0]?.physical_stock || 0, r.branch_actual_sales || 0, (r.branch_system_sales || 0) - (r.branch_credit_sales || 0));
-          const debt = calculateDebt(r.debt_records?.[0]?.opening_debt || 0, r.debt_records?.[0]?.original_closing_debt || 0, results.residualStockLoss);
+          const adjSys = deductCredit ? (r.branch_system_sales || 0) - (r.branch_credit_sales || 0) : (r.branch_system_sales || 0);
+          const results = calculateStockAndSales(r.stock_takes?.[0]?.opening_stock || 0, r.stock_takes?.[0]?.physical_stock || 0, r.branch_actual_sales || 0, adjSys);
+          const debt = calculateDebt(r.debt_records?.[0]?.opening_debt || 0, r.debt_records?.[0]?.original_closing_debt || 0, addLossToDebt ? results.residualStockLoss : 0);
           grouped[r.branch_id] = {
             name: r.branches?.name || 'Unknown', period: `${r.period_start} to ${r.period_end}`, status: r.status,
             openingDebt: r.debt_records?.[0]?.opening_debt || 0, adjClosingDebt: debt.adjustedClosingDebt, netReduction: debt.netDebtReduction, stockLoss: results.grossStockVariance, salesVariance: results.salesVariance
@@ -280,14 +346,16 @@ export default function Home() {
   // --- SHARED DATA BUILDER ---
   const buildReportData = (isHistory = false, report = null) => {
     if (isHistory) {
-      const results = calculateStockAndSales(report.stock_takes?.[0]?.opening_stock || 0, report.stock_takes?.[0]?.physical_stock || 0, report.branch_actual_sales || 0, (report.branch_system_sales || 0) - (report.branch_credit_sales || 0));
-      const debtResults = calculateDebt(report.debt_records?.[0]?.opening_debt || 0, report.debt_records?.[0]?.original_closing_debt || 0, results.residualStockLoss);
+      const adjSys = deductCredit ? (report.branch_system_sales || 0) - (report.branch_credit_sales || 0) : (report.branch_system_sales || 0);
+      const results = calculateStockAndSales(report.stock_takes?.[0]?.opening_stock || 0, report.stock_takes?.[0]?.physical_stock || 0, report.branch_actual_sales || 0, adjSys);
+      const debtResults = calculateDebt(report.debt_records?.[0]?.opening_debt || 0, report.debt_records?.[0]?.original_closing_debt || 0, addLossToDebt ? results.residualStockLoss : 0);
       return {
         branchName: report.branches?.name || 'Unknown', periodStart: report.period_start, periodEnd: report.period_end,
         openingStock: report.stock_takes?.[0]?.opening_stock || 0, physicalStock: report.stock_takes?.[0]?.physical_stock || 0, openingDebt: report.debt_records?.[0]?.opening_debt || 0, originalClosingDebt: report.debt_records?.[0]?.original_closing_debt || 0,
         openingDebtDate: report.debt_records?.[0]?.opening_debt_date || 'N/A', closingDebtDate: report.debt_records?.[0]?.closing_debt_date || 'N/A',
         results, debtResults, 
         staff: (report.sales_records || []).map(sr => ({ name: sr.salespeople?.name || '', actual: sr.actual_sales || 0, system: sr.system_sales || 0, credit: sr.credit_sales || 0 })),
+        actions: (report.corrective_actions || []).map(a => ({ finding: a.finding, amount: a.amount, actionRequired: a.action_required, responsible: a.responsible_person, deadline: a.deadline, status: a.status })),
         branchActual: report.branch_actual_sales || 0, branchSystem: report.branch_system_sales || 0, branchCredit: report.branch_credit_sales || 0,
         previousStock: report.prev_closing_stock > 0 ? { amount: report.prev_closing_stock, date: 'Manual Entry' } : null
       };
@@ -296,6 +364,7 @@ export default function Home() {
         branchName, periodStart, periodEnd, openingStock: num(openingStock), physicalStock: num(physicalStock), openingDebt: num(openingDebt), originalClosingDebt: num(originalClosingDebt),
         openingDebtDate, closingDebtDate, results: stockAndSalesResults, debtResults,
         staff: staff.map(s => ({ name: s.name || 'Unnamed', actual: num(s.actual), system: num(s.system), credit: num(s.credit) })),
+        actions: actions.map(a => ({ finding: a.finding, amount: num(a.amount), actionRequired: a.actionRequired, responsible: a.responsible, deadline: a.deadline, status: a.status })),
         branchActual: finalBranchActual, branchSystem: finalBranchSystem, branchCredit: finalBranchCredit,
         previousStock: num(prevClosingStock) > 0 ? { amount: num(prevClosingStock), date: 'Manual Entry' } : null
       };
@@ -314,8 +383,12 @@ export default function Home() {
     const unallocActual = data.branchActual - data.staff.reduce((sum, s) => sum + s.actual, 0);
     if (Math.abs(unallocActual) > 0) notes.push(`An unallocated sales gap of Ksh ${formatKsh(unallocActual)} exists between the branch aggregate actual sales and the sum of individual salesperson actual sales. This requires further investigation.`);
 
-    if (data.results.residualStockLoss > 0) notes.push(`The residual stock loss of Ksh ${formatKsh(data.results.residualStockLoss)} was added to the closing debt, increasing the original closing debt of Ksh ${formatKsh(data.originalClosingDebt)} to an adjusted closing debt of Ksh ${formatKsh(data.debtResults.adjustedClosingDebt)}.`);
-    else notes.push(`No residual stock loss was added to the debt. The adjusted closing debt remains at Ksh ${formatKsh(data.debtResults.adjustedClosingDebt)}.`);
+    if (data.results.residualStockLoss > 0) {
+      if (addLossToDebt) notes.push(`The residual stock loss of Ksh ${formatKsh(data.results.residualStockLoss)} was added to the closing debt, increasing the original closing debt of Ksh ${formatKsh(data.originalClosingDebt)} to an adjusted closing debt of Ksh ${formatKsh(data.debtResults.adjustedClosingDebt)}.`);
+      else notes.push(`The residual stock loss of Ksh ${formatKsh(data.results.residualStockLoss)} was NOT added to the debt (per current accounting policy). The adjusted closing debt remains at Ksh ${formatKsh(data.debtResults.adjustedClosingDebt)}.`);
+    } else {
+      notes.push(`No residual stock loss was added to the debt. The adjusted closing debt remains at Ksh ${formatKsh(data.debtResults.adjustedClosingDebt)}.`);
+    }
 
     if (data.previousStock && data.previousStock.amount !== null) {
       const prevStockVal = data.previousStock.amount;
@@ -336,70 +409,49 @@ export default function Home() {
   };
 
   // --- ADVANCED PDF CHART ENGINE ---
-  const drawBarChart = (doc, startX, startY, width, height, data, title, isVariance = false) => {
-    let maxVal = 0;
-    let minVal = 0;
+  const drawBarChart = (doc, startX, startY, width, height, data, title) => {
+    let maxVal = 0, minVal = 0;
     data.forEach(d => { 
-      if (d.val1 > maxVal) maxVal = d.val1; 
-      if (d.val1 < minVal) minVal = d.val1;
-      if (d.val2 && d.val2 > maxVal) maxVal = d.val2; 
-      if (d.val2 && d.val2 < minVal) minVal = d.val2;
+      if (d.val1 > maxVal) maxVal = d.val1; if (d.val1 < minVal) minVal = d.val1;
+      if (d.val2 && d.val2 > maxVal) maxVal = d.val2; if (d.val2 && d.val2 < minVal) minVal = d.val2;
     });
     
     const range = Math.max(maxVal - minVal, 1);
     maxVal += range * 0.15; minVal -= range * 0.15;
-
     const zeroLineY = startY + height - ((0 - minVal) / (maxVal - minVal)) * height;
 
-    // Title
     doc.setFontSize(9); doc.setFont('helvetica', 'bold');
     doc.text(title, startX + width / 2, startY - 5, { align: 'center' });
-    
-    // Axes
     doc.setDrawColor(150); doc.setLineWidth(0.5);
-    doc.line(startX, startY, startX, startY + height); 
-    doc.line(startX, zeroLineY, startX + width, zeroLineY); 
+    doc.line(startX, startY, startX, startY + height); doc.line(startX, zeroLineY, startX + width, zeroLineY); 
 
-    // Y-Axis Labels & Grid Lines
     doc.setFontSize(7); doc.setFont('helvetica', 'normal'); doc.setTextColor(100);
     doc.text(formatNum(maxVal), startX - 2, startY + 4, { align: 'right' });
     doc.text('0', startX - 2, zeroLineY + 2, { align: 'right' });
     if (minVal < 0) doc.text(formatNum(minVal), startX - 2, startY + height, { align: 'right' });
 
     const barGroupWidth = width / data.length;
-    const barWidth = (barGroupWidth * 0.6) / (data[0].val2 ? 2 : 1);
+    const barWidth = (barGroupWidth * 0.6) / (data[0].val2 !== undefined ? 2 : 1);
 
     data.forEach((d, i) => {
       const groupX = startX + (i * barGroupWidth) + (barGroupWidth * 0.2);
       
-      // Bar 1 (Actual)
       const h1 = ((d.val1 - 0) / (maxVal - minVal)) * height;
-      doc.setFillColor(d.val1 < 0 ? 192 : 41, d.val1 < 0 ? 57 : 128, d.val1 < 0 ? 43 : 185); // Red if negative, Blue if positive
+      doc.setFillColor(d.val1 < 0 ? 192 : 41, d.val1 < 0 ? 57 : 128, d.val1 < 0 ? 43 : 185);
       doc.rect(groupX, h1 > 0 ? zeroLineY - h1 : zeroLineY, barWidth, Math.abs(h1), 'F');
       
-      // Bar 2 (System) - if exists
       if (d.val2 !== undefined) {
         const h2 = ((d.val2 - 0) / (maxVal - minVal)) * height;
-        doc.setFillColor(211, 84, 0); // Orange
+        doc.setFillColor(211, 84, 0);
         doc.rect(groupX + barWidth + 1, h2 > 0 ? zeroLineY - h2 : zeroLineY, barWidth, Math.abs(h2), 'F');
       }
 
-      // Labels on top
       doc.setFontSize(6); doc.setTextColor(0);
       if (d.val1 !== 0) doc.text(formatNum(d.val1), groupX + barWidth/2, h1 > 0 ? zeroLineY - h1 - 2 : zeroLineY + Math.abs(h1) + 4, { align: 'center' });
       if (d.val2 !== undefined && d.val2 !== 0) doc.text(formatNum(d.val2), groupX + barWidth + 1 + barWidth/2, h2 > 0 ? zeroLineY - h2 - 2 : zeroLineY + Math.abs(h2) + 4, { align: 'center' });
 
-      // X-axis label
       doc.setFontSize(7); doc.text(d.label.substring(0, 8), groupX + barWidth, startY + height + 4, { align: 'center' });
     });
-
-    // Legend
-    if (data[0].val2 !== undefined) {
-      doc.setFillColor(41, 128, 185); doc.rect(startX + width - 60, startY - 12, 4, 4, 'F');
-      doc.setFontSize(7); doc.setTextColor(0); doc.text('Actual', startX + width - 54, startY - 9);
-      doc.setFillColor(211, 84, 0); doc.rect(startX + width - 35, startY - 12, 4, 4, 'F');
-      doc.text('System', startX + width - 29, startY - 9);
-    }
   };
 
   const generatePDF = (data, action = 'save') => {
@@ -467,21 +519,28 @@ export default function Home() {
       ], theme: 'grid', headStyles: { fillColor: [44, 62, 80] }, styles: { fontSize: 8 }
     });
 
+    // 5. RESOLUTIONS & CORRECTIVE ACTIONS
+    if (data.actions && data.actions.length > 0 && data.actions[0].finding !== '') {
+      doc.setFontSize(11); doc.setFont('helvetica', 'bold');
+      doc.text('5. Resolutions & Corrective Actions', 14, doc.lastAutoTable.finalY + 10);
+      
+      const actBody = data.actions.map(a => [a.finding, formatKsh(a.amount), a.actionRequired, a.responsible, a.deadline, a.status]);
+      autoTable(doc, {
+        startY: doc.lastAutoTable.finalY + 15, head: [['Finding', 'Amount', 'Action Required', 'Responsible', 'Deadline', 'Status']], body: actBody, theme: 'grid', headStyles: { fillColor: [192, 57, 43] }, styles: { fontSize: 8 }
+      });
+    }
+
     doc.addPage();
-    doc.setFontSize(11); doc.setFont('helvetica', 'bold'); doc.text('5. Graphical Analysis', 14, 20);
-    
-    // Sales Chart
+    doc.setFontSize(11); doc.setFont('helvetica', 'bold'); doc.text('6. Graphical Analysis', 14, 20);
     const salesChartData = data.staff.slice(0, 6).map(s => ({ label: s.name, val1: s.actual, val2: s.system - s.credit }));
     if(salesChartData.length > 0) drawBarChart(doc, 20, 40, 170, 60, salesChartData, 'Actual vs Adjusted System Sales per Staff');
 
-    // Stock Recon Chart
     drawBarChart(doc, 20, 130, 80, 50, [
       { label: 'Stock Loss', val1: data.results.grossStockShortage },
       { label: 'Sales Offset', val1: data.results.salesOffset },
       { label: 'Residual', val1: data.results.residualStockLoss }
     ], 'Stock Loss Reconciliation');
 
-    // Debt Chart
     drawBarChart(doc, 110, 130, 80, 50, [
       { label: 'Opening', val1: data.openingDebt },
       { label: 'Adj Close', val1: data.debtResults.adjustedClosingDebt }
@@ -596,6 +655,9 @@ export default function Home() {
           <button onClick={() => { setActiveTab('create'); resetForm(); }} style={{ padding: '10px 20px', marginRight: '10px', backgroundColor: activeTab === 'create' ? '#333' : '#eee', color: activeTab === 'create' ? '#fff' : '#333', border: 'none', cursor: 'pointer', borderRadius: '4px' }}>New Report</button>
           <button onClick={() => setActiveTab('history')} style={{ padding: '10px 20px', marginRight: '10px', backgroundColor: activeTab === 'history' ? '#333' : '#eee', color: activeTab === 'history' ? '#fff' : '#333', border: 'none', cursor: 'pointer', borderRadius: '4px' }}>History</button>
           <button onClick={() => setActiveTab('consolidated')} style={{ padding: '10px 20px', marginRight: '10px', backgroundColor: activeTab === 'consolidated' ? '#333' : '#eee', color: activeTab === 'consolidated' ? '#fff' : '#333', border: 'none', cursor: 'pointer', borderRadius: '4px' }}>Consolidated</button>
+          {userRole === 'Admin' && (
+            <button onClick={() => setActiveTab('admin')} style={{ padding: '10px 20px', marginRight: '10px', backgroundColor: activeTab === 'admin' ? '#333' : '#eee', color: activeTab === 'admin' ? '#fff' : '#333', border: 'none', cursor: 'pointer', borderRadius: '4px' }}>Admin Settings</button>
+          )}
           <button onClick={() => supabase.auth.signOut()} style={{ padding: '10px 20px', backgroundColor: '#ff4d4f', color: '#fff', border: 'none', cursor: 'pointer', borderRadius: '4px' }}>Logout</button>
         </div>
       </div>
@@ -625,6 +687,73 @@ export default function Home() {
         </div>
       )}
 
+      {/* ADMIN SETTINGS TAB */}
+      {activeTab === 'admin' && userRole === 'Admin' && (
+        <div>
+          <h2 style={{ marginBottom: '20px' }}>Admin Management</h2>
+          
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+            {/* ACCOUNTING POLICIES */}
+            <div style={{ padding: '20px', backgroundColor: '#f9f9f9', borderRadius: '8px', border: '1px solid #ddd' }}>
+              <h3 style={{ marginTop: 0 }}>Accounting Policies</h3>
+              <p style={{ fontSize: '13px', color: '#666' }}>These settings apply globally to all new reports and consolidated calculations.</p>
+              
+              <div style={{ marginBottom: '15px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px', backgroundColor: '#fff', border: '1px solid #eee' }}>
+                <div>
+                  <strong>Deduct Credit Sales from System Sales</strong>
+                  <div style={{ fontSize: '12px', color: '#666' }}>If enabled, Adjusted System = System - Credit.</div>
+                </div>
+                <input type="checkbox" checked={deductCredit} onChange={e => handleUpdateSettings('deduct_credit_sales', e.target.checked)} style={{ width: '20px', height: '20px', cursor: 'pointer' }} />
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px', backgroundColor: '#fff', border: '1px solid #eee' }}>
+                <div>
+                  <strong>Add Residual Stock Loss to Debt</strong>
+                  <div style={{ fontSize: '12px', color: '#666' }}>If enabled, Adjusted Debt includes the residual loss.</div>
+                </div>
+                <input type="checkbox" checked={addLossToDebt} onChange={e => handleUpdateSettings('add_residual_loss_to_debt', e.target.checked)} style={{ width: '20px', height: '20px', cursor: 'pointer' }} />
+              </div>
+            </div>
+
+            {/* BRANCH MANAGEMENT */}
+            <div style={{ padding: '20px', backgroundColor: '#f9f9f9', borderRadius: '8px', border: '1px solid #ddd' }}>
+              <h3 style={{ marginTop: 0 }}>Manage Branches</h3>
+              <div style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
+                <input type="text" value={newBranchName} onChange={e => setNewBranchName(e.target.value)} placeholder="New Branch Name" style={{ flex: 1, padding: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
+                <button onClick={handleAddBranch} style={{ padding: '10px 20px', backgroundColor: '#28a745', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>Add Branch</button>
+              </div>
+              
+              <div style={{ maxHeight: '300px', overflowY: 'auto', border: '1px solid #eee' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                  <thead>
+                    <tr style={{ backgroundColor: '#f0f0f0', borderBottom: '1px solid #ddd' }}>
+                      <th style={{ padding: '8px', textAlign: 'left' }}>Branch Name</th>
+                      <th style={{ padding: '8px', textAlign: 'center' }}>Status</th>
+                      <th style={{ padding: '8px', textAlign: 'right' }}>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {branches.map(b => (
+                      <tr key={b.id} style={{ borderBottom: '1px solid #eee' }}>
+                        <td style={{ padding: '8px' }}>{b.name}</td>
+                        <td style={{ padding: '8px', textAlign: 'center' }}>
+                          <span style={{ color: b.is_active ? 'green' : 'red', fontWeight: 'bold' }}>{b.is_active ? 'Active' : 'Inactive'}</span>
+                        </td>
+                        <td style={{ padding: '8px', textAlign: 'right' }}>
+                          <button onClick={() => toggleBranchStatus(b.id, b.is_active)} style={{ padding: '4px 8px', backgroundColor: b.is_active ? '#dc3545' : '#28a745', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '11px' }}>
+                            {b.is_active ? 'Deactivate' : 'Activate'}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* CREATE TAB */}
       {activeTab === 'create' && (
         <div>
@@ -638,7 +767,7 @@ export default function Home() {
               <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Branch</label>
               <select value={selectedBranch} onChange={(e) => setSelectedBranch(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #ccc', borderRadius: '4px' }}>
                 <option value="">-- Choose Branch --</option>
-                {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+                {branches.filter(b => b.is_active).map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
               </select>
             </div>
             <div style={{ flex: 1 }}>
@@ -746,6 +875,50 @@ export default function Home() {
                   </div>
                 ))}
               </div>
+
+              {/* CORRECTIVE ACTIONS */}
+              <div style={{ padding: '20px', backgroundColor: '#f9f9f9', borderRadius: '8px', marginBottom: '20px', border: '1px solid #ddd' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+                  <h3 style={{ margin: 0 }}>4. Resolutions & Actions</h3>
+                  <button onClick={() => setActions([...actions, { finding: '', amount: '', actionRequired: '', responsible: '', deadline: '', status: 'Pending' }])} style={{ padding: '8px 12px', cursor: 'pointer', backgroundColor: '#0070f3', color: '#fff', border: 'none', borderRadius: '4px' }}>+ Add Action</button>
+                </div>
+                {actions.map((a, i) => (
+                  <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '5px', marginBottom: '10px', padding: '10px', border: '1px solid #ddd', borderRadius: '4px' }}>
+                    <div style={{ gridColumn: 'span 2' }}>
+                      <label style={{ display: 'block', fontSize: '11px', fontWeight: 'bold' }}>Finding</label>
+                      <input type="text" value={a.finding} onChange={e => { const n = [...actions]; n[i].finding = e.target.value; setActions(n); }} style={{ width: '100%', padding: '8px', border: '1px solid #ccc', borderRadius: '4px' }} />
+                    </div>
+                    <div>
+                      <label style={{ display: 'block', fontSize: '11px', fontWeight: 'bold' }}>Amount (Ksh)</label>
+                      <input type="number" value={a.amount} onChange={e => { const n = [...actions]; n[i].amount = e.target.value; setActions(n); }} style={{ width: '100%', padding: '8px', border: '1px solid #ccc', borderRadius: '4px' }} />
+                    </div>
+                    <div>
+                      <label style={{ display: 'block', fontSize: '11px', fontWeight: 'bold' }}>Action Required</label>
+                      <input type="text" value={a.actionRequired} onChange={e => { const n = [...actions]; n[i].actionRequired = e.target.value; setActions(n); }} style={{ width: '100%', padding: '8px', border: '1px solid #ccc', borderRadius: '4px' }} />
+                    </div>
+                    <div>
+                      <label style={{ display: 'block', fontSize: '11px', fontWeight: 'bold' }}>Responsible</label>
+                      <input type="text" value={a.responsible} onChange={e => { const n = [...actions]; n[i].responsible = e.target.value; setActions(n); }} style={{ width: '100%', padding: '8px', border: '1px solid #ccc', borderRadius: '4px' }} />
+                    </div>
+                    <div style={{ display: 'flex', gap: '5px' }}>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ display: 'block', fontSize: '11px', fontWeight: 'bold' }}>Deadline</label>
+                        <input type="date" value={a.deadline} onChange={e => { const n = [...actions]; n[i].deadline = e.target.value; setActions(n); }} style={{ width: '100%', padding: '8px', border: '1px solid #ccc', borderRadius: '4px' }} />
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ display: 'block', fontSize: '11px', fontWeight: 'bold' }}>Status</label>
+                        <select value={a.status} onChange={e => { const n = [...actions]; n[i].status = e.target.value; setActions(n); }} style={{ width: '100%', padding: '8px', border: '1px solid #ccc', borderRadius: '4px' }}>
+                          <option>Pending</option>
+                          <option>In Progress</option>
+                          <option>Resolved</option>
+                        </select>
+                      </div>
+                    </div>
+                    <button onClick={() => setActions(actions.filter((_, idx) => idx !== i))} style={{ gridColumn: 'span 2', marginTop: '5px', padding: '6px', backgroundColor: '#ff4d4f', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>Remove Action</button>
+                  </div>
+                ))}
+              </div>
+
               <div style={{ display: 'flex', gap: '10px' }}>
                 <button onClick={handleSave} disabled={isSaving} style={{ flex: 1, padding: '15px', backgroundColor: editingReportId ? '#ff9800' : '#0070f3', color: '#fff', fontSize: '16px', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>
                   {isSaving ? 'Saving...' : editingReportId ? 'Update Draft' : 'Save to Database'}
@@ -853,7 +1026,7 @@ export default function Home() {
         </div>
       )}
 
-      {/* FULL SCREEN DOCUMENT VIEWER MODAL (Same as previous) */}
+      {/* FULL SCREEN DOCUMENT VIEWER MODAL */}
       {viewingReport && (
         <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: 'rgba(0,0,0,0.8)', display: 'flex', justifyContent: 'center', alignItems: 'flex-start', zIndex: 1000, padding: '40px 20px', overflowY: 'auto' }}>
           <div style={{ position: 'relative', width: '100%', maxWidth: '850px', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
@@ -975,7 +1148,35 @@ export default function Home() {
                 </tbody>
               </table>
 
-              {/* WEB PREVIEW CHART */}
+              {/* SECTION 5: CORRECTIVE ACTIONS */}
+              {viewingReport.actions && viewingReport.actions.length > 0 && viewingReport.actions[0].finding !== '' && (
+                <>
+                  <h3 style={{ fontSize: '16px', borderBottom: '2px solid #000', paddingBottom: '5px', marginTop: '30px' }}>5. Resolutions & Corrective Actions</h3>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px', marginTop: '10px' }}>
+                    <thead><tr style={{ backgroundColor: '#c0392b', color: '#fff' }}>
+                      <th style={{ padding: '8px', textAlign: 'left', border: '1px solid #000' }}>Finding</th>
+                      <th style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>Amount</th>
+                      <th style={{ padding: '8px', textAlign: 'left', border: '1px solid #000' }}>Action Required</th>
+                      <th style={{ padding: '8px', textAlign: 'left', border: '1px solid #000' }}>Responsible</th>
+                      <th style={{ padding: '8px', textAlign: 'center', border: '1px solid #000' }}>Deadline</th>
+                      <th style={{ padding: '8px', textAlign: 'center', border: '1px solid #000' }}>Status</th>
+                    </tr></thead>
+                    <tbody>
+                      {viewingReport.actions.map((a, i) => (
+                        <tr key={i}>
+                          <td style={{ padding: '8px', border: '1px solid #000' }}>{a.finding}</td>
+                          <td style={{ padding: '8px', textAlign: 'right', border: '1px solid #000' }}>{formatKsh(a.amount)}</td>
+                          <td style={{ padding: '8px', border: '1px solid #000' }}>{a.actionRequired}</td>
+                          <td style={{ padding: '8px', border: '1px solid #000' }}>{a.responsible}</td>
+                          <td style={{ padding: '8px', textAlign: 'center', border: '1px solid #000' }}>{a.deadline}</td>
+                          <td style={{ padding: '8px', textAlign: 'center', border: '1px solid #000' }}>{a.status}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
+              )}
+
               {renderPreviewChart(viewingReport.staff)}
 
             </div>
