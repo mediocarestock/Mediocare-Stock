@@ -30,6 +30,8 @@ export default function Home() {
   const today = new Date().toISOString().split('T')[0];
   const [periodStart, setPeriodStart] = useState(today);
   const [periodEnd, setPeriodEnd] = useState(today);
+  const [openingDebtDate, setOpeningDebtDate] = useState(today);
+  const [closingDebtDate, setClosingDebtDate] = useState(today);
   const [staff, setStaff] = useState([{ name: '', actual: '', system: '', credit: '' }]);
 
   // --- HISTORY & CONSOLIDATED STATE ---
@@ -65,7 +67,6 @@ export default function Home() {
   // --- HELPERS ---
   const num = (val) => parseFloat(val) || 0;
   const formatKsh = (amount) => new Intl.NumberFormat('en-KE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount);
-  const formatNum = (amount) => new Intl.NumberFormat('en-KE', { maximumFractionDigits: 0 }).format(amount);
 
   // --- CSV UPLOAD ---
   const handleCSVUpload = (e) => {
@@ -91,6 +92,7 @@ export default function Home() {
   const totalSystem = staff.reduce((sum, s) => sum + num(s.system), 0);
   const totalCredit = staff.reduce((sum, s) => sum + num(s.credit), 0);
   const adjustedSystemSales = totalSystem - totalCredit;
+  
   const stockAndSalesResults = calculateStockAndSales(num(openingStock), num(physicalStock), totalActual, adjustedSystemSales);
   const debtResults = calculateDebt(num(openingDebt), num(originalClosingDebt), stockAndSalesResults.residualStockLoss);
   const branchName = branches.find(b => b.id === selectedBranch)?.name || '';
@@ -103,8 +105,13 @@ export default function Home() {
       const { data: reportData, error: reportError } = await supabase.from('reports').insert({ branch_id: selectedBranch, period_start: periodStart, period_end: periodEnd, status: 'Draft' }).select().single();
       if (reportError) throw reportError;
       
-      await supabase.from('stock_takes').insert({ report_id: reportData.id, opening_stock: num(openingStock), physical_stock: num(physicalStock), stock_date: today });
-      await supabase.from('debt_records').insert({ report_id: reportData.id, opening_debt: num(openingDebt), original_closing_debt: num(originalClosingDebt), residual_stock_loss_added: stockAndSalesResults.residualStockLoss });
+      await supabase.from('stock_takes').insert({ 
+        report_id: reportData.id, opening_stock: num(openingStock), physical_stock: num(physicalStock), stock_date: today, valuation_date: periodStart, physical_count_date: periodEnd 
+      });
+      
+      await supabase.from('debt_records').insert({ 
+        report_id: reportData.id, opening_debt: num(openingDebt), original_closing_debt: num(originalClosingDebt), residual_stock_loss_added: stockAndSalesResults.residualStockLoss, opening_debt_date: openingDebtDate, closing_debt_date: closingDebtDate 
+      });
 
       for (const person of staff) {
         if (!person.name) continue;
@@ -158,7 +165,7 @@ export default function Home() {
           const debt = calculateDebt(oDebt, cDebt, results.residualStockLoss);
 
           grouped[r.branch_id] = {
-            name: r.branches.name, period: `${r.period_start} to ${r.period_end}`,
+            name: r.branches?.name || 'Unknown', period: `${r.period_start} to ${r.period_end}`,
             openingDebt: oDebt, adjClosingDebt: debt.adjustedClosingDebt,
             netReduction: debt.netDebtReduction, stockLoss: results.grossStockVariance,
             salesVariance: results.salesVariance
@@ -170,7 +177,7 @@ export default function Home() {
     setIsLoadingData(false);
   };
 
-  // --- PDF GENERATOR (SINGLE BRANCH) ---
+  // --- PDF GENERATORS ---
   const generateBranchPDF = (data) => {
     const doc = new jsPDF();
     const pageWidth = doc.internal.pageSize.getWidth();
@@ -196,12 +203,10 @@ export default function Home() {
   };
 
   const handleGenerateLivePDF = () => {
-    generateBranchPDF({
-      branchName, results: stockAndSalesResults, debtResults
-    });
+    if(!selectedBranch) return alert("Select a branch first");
+    generateBranchPDF({ branchName, results: stockAndSalesResults, debtResults });
   };
 
-  // --- CONSOLIDATED PDF GENERATOR ---
   const generateConsolidatedPDF = () => {
     const doc = new jsPDF('landscape');
     const pageWidth = doc.internal.pageSize.getWidth();
@@ -231,7 +236,7 @@ export default function Home() {
   };
 
   // --- AUTHENTICATION UI ---
-  if (authLoading) return <div style={{ padding: '50px', textAlign: 'center' }}>Loading...</div>;
+  if (authLoading) return <div style={{ padding: '50px', textAlign: 'center' }}>Loading System...</div>;
 
   if (!session) {
     return (
@@ -311,10 +316,28 @@ export default function Home() {
                 <input type="number" value={openingStock} onChange={e => setOpeningStock(e.target.value)} style={{ width: '100%', padding: '10px', marginBottom: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
                 <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Physical Stock (Ksh)</label>
                 <input type="number" value={physicalStock} onChange={e => setPhysicalStock(e.target.value)} style={{ width: '100%', padding: '10px', marginBottom: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
-                <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Opening Debt (Ksh)</label>
-                <input type="number" value={openingDebt} onChange={e => setOpeningDebt(e.target.value)} style={{ width: '100%', padding: '10px', marginBottom: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
-                <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Original Closing Debt (Ksh)</label>
-                <input type="number" value={originalClosingDebt} onChange={e => setOriginalClosingDebt(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
+                
+                <div style={{ display: 'flex', gap: '10px' }}>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Opening Debt Date</label>
+                    <input type="date" value={openingDebtDate} onChange={e => setOpeningDebtDate(e.target.value)} style={{ width: '100%', padding: '10px', marginBottom: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Opening Debt (Ksh)</label>
+                    <input type="number" value={openingDebt} onChange={e => setOpeningDebt(e.target.value)} style={{ width: '100%', padding: '10px', marginBottom: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', gap: '10px' }}>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Closing Debt Date</label>
+                    <input type="date" value={closingDebtDate} onChange={e => setClosingDebtDate(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Original Closing Debt (Ksh)</label>
+                    <input type="number" value={originalClosingDebt} onChange={e => setOriginalClosingDebt(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #ccc', borderRadius: '4px' }} />
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -354,9 +377,14 @@ export default function Home() {
                 ))}
               </div>
 
-              <button onClick={handleSave} disabled={isSaving} style={{ width: '100%', padding: '15px', backgroundColor: '#0070f3', color: '#fff', fontSize: '16px', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>
-                {isSaving ? 'Saving...' : 'Save Report to Database'}
-              </button>
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <button onClick={handleSave} disabled={isSaving} style={{ flex: 1, padding: '15px', backgroundColor: '#0070f3', color: '#fff', fontSize: '16px', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>
+                  {isSaving ? 'Saving...' : 'Save to Database'}
+                </button>
+                <button onClick={handleGenerateLivePDF} style={{ flex: 1, padding: '15px', backgroundColor: '#000', color: '#fff', fontSize: '16px', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>
+                  Download PDF (Preview)
+                </button>
+              </div>
             </div>
           </div>
         </div>
