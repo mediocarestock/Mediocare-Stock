@@ -226,15 +226,9 @@ export default function Home() {
 
   const fetchHistory = async () => {
     setIsLoadingData(true);
-    // Using simple query then fetching nested data to prevent Supabase join errors
     const { data: reports, error } = await supabase.from('reports').select('*, branches(name)').order('created_at', { ascending: false });
     
-    if (error) {
-      console.error("History fetch error:", error);
-      alert("Error loading history: " + error.message);
-      setIsLoadingData(false);
-      return;
-    }
+    if (error) { alert("Error loading history: " + error.message); setIsLoadingData(false); return; }
 
     const fullReports = [];
     for (const r of reports) {
@@ -242,12 +236,7 @@ export default function Home() {
       const { data: dr } = await supabase.from('debt_records').select('*').eq('report_id', r.id);
       const { data: sr } = await supabase.from('sales_records').select('*, salespeople(name)').eq('report_id', r.id);
       
-      fullReports.push({
-        ...r,
-        stock_takes: st || [],
-        debt_records: dr || [],
-        sales_records: sr || []
-      });
+      fullReports.push({ ...r, stock_takes: st || [], debt_records: dr || [], sales_records: sr || [] });
     }
     setHistoricalReports(fullReports);
     setIsLoadingData(false);
@@ -285,14 +274,11 @@ export default function Home() {
     setIsLoadingData(false);
   };
 
-  // --- SMART PDF ENGINE (MATCHING SAMPLES) ---
+  // --- SMART PDF ENGINE ---
   const drawBarChart = (doc, startX, startY, width, height, data, title) => {
     let maxVal = 0;
-    data.forEach(d => {
-      if (d.val1 > maxVal) maxVal = d.val1;
-      if (d.val2 && d.val2 > maxVal) maxVal = d.val2;
-    });
-    maxVal = maxVal * 1.2; // 20% padding
+    data.forEach(d => { if (d.val1 > maxVal) maxVal = d.val1; if (d.val2 && d.val2 > maxVal) maxVal = d.val2; });
+    maxVal = maxVal * 1.2;
 
     doc.setFontSize(9); doc.setFont('helvetica', 'bold');
     doc.text(title, startX + width / 2, startY - 5, { align: 'center' });
@@ -305,14 +291,12 @@ export default function Home() {
     data.forEach((d, i) => {
       const groupX = startX + (i * barGroupWidth) + (barGroupWidth * 0.2);
       
-      // Bar 1
       const h1 = (d.val1 / maxVal) * height;
       doc.setFillColor(50, 50, 50);
       doc.rect(groupX, startY + height - h1, barWidth, h1, 'F');
       doc.setFontSize(6); doc.setTextColor(0);
       doc.text(formatNum(d.val1), groupX + barWidth/2, startY + height - h1 - 2, { align: 'center' });
 
-      // Bar 2 (If exists)
       if (d.val2) {
         const h2 = (d.val2 / maxVal) * height;
         doc.setFillColor(200, 200, 200);
@@ -328,7 +312,6 @@ export default function Home() {
     const doc = new jsPDF();
     const pageWidth = doc.internal.pageSize.getWidth();
     
-    // HEADER
     doc.setFontSize(16); doc.setFont('helvetica', 'bold'); doc.setTextColor(0);
     doc.text('MEDIOCARE PHARMACEUTICALS LTD', pageWidth / 2, 20, { align: 'center' });
     doc.setFontSize(12);
@@ -336,11 +319,9 @@ export default function Home() {
     doc.setFontSize(9); doc.setFont('helvetica', 'normal');
     doc.text(`Period: ${data.periodStart} to ${data.periodEnd}`, pageWidth / 2, 34, { align: 'center' });
 
-    // --- NARRATIVE GENERATOR ---
     let narrative = [];
     const totalVar = data.results.salesVariance;
     if (totalVar > 0) {
-      // Find top drivers
       const sortedStaff = [...data.staff].sort((a, b) => (b.actual - (b.system - b.credit)) - (a.actual - (a.system - a.credit)));
       const topDriver1 = sortedStaff[0] ? `${sortedStaff[0].name} (${Math.round(((sortedStaff[0].actual - (sortedStaff[0].system - sortedStaff[0].credit)) / totalVar) * 100)}%)` : '';
       const topDriver2 = sortedStaff[1] ? `${sortedStaff[1].name} (${Math.round(((sortedStaff[1].actual - (sortedStaff[1].system - sortedStaff[1].credit)) / totalVar) * 100)}%)` : '';
@@ -351,14 +332,9 @@ export default function Home() {
     } else if (totalVar < 0) {
       narrative.push(`• Negative Sales Variance: Ksh ${formatKsh(Math.abs(totalVar))} (System sales exceeded actual cash). Requires investigation.`);
     }
+    if (data.debtResults.netDebtReduction > 0) narrative.push(`• Debt reduced by Ksh ${formatKsh(data.debtResults.netDebtReduction)} (${data.debtResults.debtReductionPercentage?.toFixed(2)}%) to Ksh ${formatKsh(data.debtResults.adjustedClosingDebt)}.`);
+    else narrative.push(`• ADVERSE: Debt increased by Ksh ${formatKsh(Math.abs(data.debtResults.netDebtReduction))}.`);
 
-    if (data.debtResults.netDebtReduction > 0) {
-      narrative.push(`• Debt reduced by Ksh ${formatKsh(data.debtResults.netDebtReduction)} (${data.debtResults.debtReductionPercentage?.toFixed(2)}%) to Ksh ${formatKsh(data.debtResults.adjustedClosingDebt)}.`);
-    } else {
-      narrative.push(`• ADVERSE: Debt increased by Ksh ${formatKsh(Math.abs(data.debtResults.netDebtReduction))}.`);
-    }
-
-    // 1. Executive Summary
     doc.setFontSize(11); doc.setFont('helvetica', 'bold');
     doc.text('1. Executive Summary', 14, 45);
     doc.setFontSize(9); doc.setFont('helvetica', 'normal');
@@ -368,7 +344,6 @@ export default function Home() {
       doc.text(splitText, 14, summaryY); summaryY += (splitText.length * 5) + 2;
     });
 
-    // 2. Stock Position
     doc.setFontSize(11); doc.setFont('helvetica', 'bold');
     doc.text('2. Stock Position & Offset', 14, summaryY + 5);
     autoTable(doc, {
@@ -384,7 +359,6 @@ export default function Home() {
       theme: 'grid', headStyles: { fillColor: [44, 62, 80] }, styles: { fontSize: 8 }
     });
 
-    // 3. Sales Performance
     doc.setFontSize(11); doc.setFont('helvetica', 'bold');
     doc.text('3. Sales Performance Analysis', 14, doc.lastAutoTable.finalY + 10);
     const salesBody = data.staff.map(s => {
@@ -397,13 +371,10 @@ export default function Home() {
       body: salesBody,
       theme: 'striped', headStyles: { fillColor: [44, 62, 80] }, styles: { fontSize: 8 },
       didParseCell: function (data) {
-        if (data.section === 'body' && data.column.index === 5 && data.cell.text[0].includes('-')) {
-          data.cell.styles.textColor = [192, 57, 43];
-        }
+        if (data.section === 'body' && data.column.index === 5 && data.cell.text[0].includes('-')) data.cell.styles.textColor = [192, 57, 43];
       }
     });
 
-    // 4. Debt Movement
     doc.setFontSize(11); doc.setFont('helvetica', 'bold');
     doc.text('4. Branch Account Debt Movement', 14, doc.lastAutoTable.finalY + 10);
     autoTable(doc, {
@@ -420,42 +391,24 @@ export default function Home() {
       theme: 'grid', headStyles: { fillColor: [44, 62, 80] }, styles: { fontSize: 8 }
     });
 
-    // 5. Graphs
     doc.addPage();
     doc.setFontSize(11); doc.setFont('helvetica', 'bold'); doc.text('5. Graphical Analysis', 14, 20);
-    
-    // Chart 1: Individual Sales
     const chartData = data.staff.slice(0, 6).map(s => ({ label: s.name, val1: s.actual, val2: s.system - s.credit }));
     if(chartData.length > 0) drawBarChart(doc, 20, 40, 170, 60, chartData, 'Actual vs Adjusted System Sales');
 
-    // Chart 2: Stock Reconciliation
     drawBarChart(doc, 20, 130, 80, 50, [
       { label: 'Stock Loss', val1: data.results.grossStockShortage },
       { label: 'Sales Offset', val1: data.results.salesOffset },
       { label: 'Residual', val1: data.results.residualStockLoss }
     ], 'Stock Loss Reconciliation');
 
-    // Chart 3: Debt
     drawBarChart(doc, 110, 130, 80, 50, [
       { label: 'Opening', val1: data.openingDebt },
       { label: 'Adj Close', val1: data.debtResults.adjustedClosingDebt }
     ], 'Debt Movement');
 
-    if (action === 'view') {
-      window.open(doc.output('bloburl'), '_blank');
-    } else {
-      doc.save(`${data.branchName}_Report.pdf`);
-    }
-  };
-
-  const handleGenerateLivePDF = (action) => {
-    if(!selectedBranch) return alert("Select a branch first");
-    generateSmartPDF({ 
-      branchName, periodStart, periodEnd, openingStock: num(openingStock), physicalStock: num(physicalStock),
-      openingDebt: num(openingDebt), originalClosingDebt: num(originalClosingDebt), 
-      openingDebtDate, closingDebtDate, results: stockAndSalesResults, debtResults, 
-      staff: staff.map(s => ({ name: s.name, actual: num(s.actual), system: num(s.system), credit: num(s.credit) }))
-    }, action);
+    if (action === 'view') window.open(doc.output('bloburl'), '_blank');
+    else doc.save(`${data.branchName}_Report.pdf`);
   };
 
   const handleGenerateHistoryPDF = (report, action) => {
@@ -475,16 +428,138 @@ export default function Home() {
     const debtResults = calculateDebt(oDebt, cDebt, results.residualStockLoss);
 
     generateSmartPDF({ 
-      branchName: report.branches?.name || 'Unknown', 
-      periodStart: report.period_start, periodEnd: report.period_end,
+      branchName: report.branches?.name || 'Unknown', periodStart: report.period_start, periodEnd: report.period_end,
       openingStock: oStk, physicalStock: pStk, openingDebt: oDebt, originalClosingDebt: cDebt,
-      openingDebtDate: report.debt_records?.[0]?.opening_debt_date || 'N/A', 
-      closingDebtDate: report.debt_records?.[0]?.closing_debt_date || 'N/A',
+      openingDebtDate: report.debt_records?.[0]?.opening_debt_date || 'N/A', closingDebtDate: report.debt_records?.[0]?.closing_debt_date || 'N/A',
       results, debtResults, staff: staffData 
     }, action);
   };
 
-  // --- UI (Same as before) ---
+  // --- BUILD LIVE PREVIEW DATA ---
+  const buildLivePreviewData = () => {
+    return { 
+      branchName, periodStart, periodEnd, openingStock: num(openingStock), physicalStock: num(physicalStock),
+      openingDebt: num(openingDebt), originalClosingDebt: num(originalClosingDebt), 
+      openingDebtDate, closingDebtDate, results: stockAndSalesResults, debtResults, 
+      staff: staff.map(s => ({ name: s.name, actual: num(s.actual), system: num(s.system), credit: num(s.credit) }))
+    };
+  };
+
+  // --- BUILD HISTORY PREVIEW DATA ---
+  const buildHistoryPreviewData = (report) => {
+    const oStk = report.stock_takes?.[0]?.opening_stock || 0;
+    const pStk = report.stock_takes?.[0]?.physical_stock || 0;
+    const oDebt = report.debt_records?.[0]?.opening_debt || 0;
+    const cDebt = report.debt_records?.[0]?.original_closing_debt || 0;
+    const staffData = (report.sales_records || []).map(sr => ({
+      name: sr.salespeople?.name || '', actual: sr.actual_sales || 0, system: sr.system_sales || 0, credit: sr.credit_sales || 0
+    }));
+    const tAct = staffData.reduce((s, x) => s + x.actual, 0);
+    const tSys = staffData.reduce((s, x) => s + x.system, 0);
+    const tCre = staffData.reduce((s, x) => s + x.credit, 0);
+
+    const results = calculateStockAndSales(oStk, pStk, tAct, tSys - tCre);
+    const debtResults = calculateDebt(oDebt, cDebt, results.residualStockLoss);
+
+    return { 
+      branchName: report.branches?.name || 'Unknown', periodStart: report.period_start, periodEnd: report.period_end,
+      openingStock: oStk, physicalStock: pStk, openingDebt: oDebt, originalClosingDebt: cDebt,
+      openingDebtDate: report.debt_records?.[0]?.opening_debt_date || 'N/A', closingDebtDate: report.debt_records?.[0]?.closing_debt_date || 'N/A',
+      results, debtResults, staff: staffData 
+    };
+  };
+
+  // --- RENDER DOCUMENT VIEWER ---
+  const renderDocumentViewer = (data) => {
+    const narrative = [];
+    if (data.results.salesVariance > 0) {
+      const sortedStaff = [...data.staff].sort((a, b) => (b.actual - (b.system - b.credit)) - (a.actual - (a.system - a.credit)));
+      const top1 = sortedStaff[0] ? `${sortedStaff[0].name} (${Math.round(((sortedStaff[0].actual - (sortedStaff[0].system - sortedStaff[0].credit)) / data.results.salesVariance) * 100)}%)` : '';
+      narrative.push(`Positive Sales Variance of Ksh ${formatKsh(data.results.salesVariance)} indicates unrecorded cash/timing differences.`);
+      if (top1) narrative.push(`Major variance drivers include ${top1}.`);
+      narrative.push(`The positive variance offsets the stock shortage, leaving a residual loss of Ksh ${formatKsh(data.results.residualStockLoss)}.`);
+    } else if (data.results.salesVariance < 0) {
+      narrative.push(`Negative Sales Variance of Ksh ${formatKsh(Math.abs(data.results.salesVariance))} indicates system sales exceeded actual cash collected.`);
+    }
+    if (data.debtResults.netDebtReduction > 0) narrative.push(`Branch debt decreased by Ksh ${formatKsh(data.debtResults.netDebtReduction)} to a closing balance of Ksh ${formatKsh(data.debtResults.adjustedClosingDebt)}.`);
+    else narrative.push(`ADVERSE: Branch debt increased by Ksh ${formatKsh(Math.abs(data.debtResults.netDebtReduction))}.`);
+
+    return (
+      <div style={{ backgroundColor: '#fff', padding: '40px', borderRadius: '8px', boxShadow: '0 4px 20px rgba(0,0,0,0.15)', maxWidth: '800px', width: '100%', maxHeight: '90vh', overflowY: 'auto' }}>
+        
+        {/* HEADER */}
+        <div style={{ textAlign: 'center', borderBottom: '2px solid #333', paddingBottom: '20px', marginBottom: '20px' }}>
+          <h1 style={{ margin: 0, fontSize: '24px', color: '#000' }}>MEDIOCARE PHARMACEUTICALS LTD</h1>
+          <h2 style={{ margin: '10px 0', fontSize: '18px', color: '#333' }}>{data.branchName.toUpperCase()} — FINANCIAL REPORT</h2>
+          <p style={{ margin: 0, fontSize: '14px', color: '#666' }}>Period: {data.periodStart} to {data.periodEnd}</p>
+        </div>
+
+        {/* SECTION 1: EXEC SUMMARY */}
+        <h3 style={{ fontSize: '16px', borderBottom: '1px solid #ccc', paddingBottom: '5px' }}>1. Executive Summary</h3>
+        <ul style={{ fontSize: '14px', lineHeight: '1.6', color: '#333' }}>
+          {narrative.map((text, i) => <li key={i} style={{ marginBottom: '8px' }}>{text}</li>)}
+        </ul>
+
+        {/* SECTION 2: STOCK */}
+        <h3 style={{ fontSize: '16px', borderBottom: '1px solid #ccc', paddingBottom: '5px', marginTop: '30px' }}>2. Stock Position & Offset</h3>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px', marginTop: '10px' }}>
+          <thead><tr style={{ backgroundColor: '#f5f5f5', borderBottom: '2px solid #ccc' }}>
+            <th style={{ padding: '10px', textAlign: 'left' }}>Item</th><th style={{ padding: '10px', textAlign: 'right' }}>Ksh</th><th style={{ padding: '10px', textAlign: 'left' }}>Remarks</th>
+          </tr></thead>
+          <tbody>
+            <tr style={{ borderBottom: '1px solid #eee' }}><td style={{ padding: '10px' }}>Stock before stock take</td><td style={{ padding: '10px', textAlign: 'right' }}>{formatKsh(data.openingStock)}</td><td style={{ padding: '10px' }}>Opening</td></tr>
+            <tr style={{ borderBottom: '1px solid #eee' }}><td style={{ padding: '10px' }}>Stock after stock take</td><td style={{ padding: '10px', textAlign: 'right' }}>{formatKsh(data.physicalStock)}</td><td style={{ padding: '10px' }}>Physical</td></tr>
+            <tr style={{ borderBottom: '1px solid #eee' }}><td style={{ padding: '10px', fontWeight: 'bold' }}>Gross Stock Variance</td><td style={{ padding: '10px', textAlign: 'right', fontWeight: 'bold' }}>{formatKsh(data.results.grossStockVariance)}</td><td style={{ padding: '10px' }}>Difference</td></tr>
+            <tr style={{ borderBottom: '1px solid #eee' }}><td style={{ padding: '10px' }}>Less: Positive Sales Offset</td><td style={{ padding: '10px', textAlign: 'right' }}>({formatKsh(data.results.salesOffset)})</td><td style={{ padding: '10px' }}>Transferred from sales</td></tr>
+            <tr style={{ backgroundColor: '#fafafa' }}><td style={{ padding: '10px', fontWeight: 'bold' }}>Residual Stock Loss</td><td style={{ padding: '10px', textAlign: 'right', fontWeight: 'bold', color: '#dc3545' }}>{formatKsh(data.results.residualStockLoss)}</td><td style={{ padding: '10px' }}>Added to debt</td></tr>
+          </tbody>
+        </table>
+
+        {/* SECTION 3: SALES */}
+        <h3 style={{ fontSize: '16px', borderBottom: '1px solid #ccc', paddingBottom: '5px', marginTop: '30px' }}>3. Sales Performance Analysis</h3>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px', marginTop: '10px' }}>
+          <thead><tr style={{ backgroundColor: '#f5f5f5', borderBottom: '2px solid #ccc' }}>
+            <th style={{ padding: '10px', textAlign: 'left' }}>Staff</th><th style={{ padding: '10px', textAlign: 'right' }}>Actual</th><th style={{ padding: '10px', textAlign: 'right' }}>System</th><th style={{ padding: '10px', textAlign: 'right' }}>Credit</th><th style={{ padding: '10px', textAlign: 'right' }}>Adj. System</th><th style={{ padding: '10px', textAlign: 'right' }}>Variance</th>
+          </tr></thead>
+          <tbody>
+            {data.staff.map((s, idx) => {
+              const adjSys = s.system - s.credit;
+              const variance = s.actual - adjSys;
+              return (
+                <tr key={idx} style={{ borderBottom: '1px solid #eee' }}>
+                  <td style={{ padding: '10px' }}>{s.name}</td>
+                  <td style={{ padding: '10px', textAlign: 'right' }}>{formatKsh(s.actual)}</td>
+                  <td style={{ padding: '10px', textAlign: 'right' }}>{formatKsh(s.system)}</td>
+                  <td style={{ padding: '10px', textAlign: 'right' }}>{formatKsh(s.credit)}</td>
+                  <td style={{ padding: '10px', textAlign: 'right' }}>{formatKsh(adjSys)}</td>
+                  <td style={{ padding: '10px', textAlign: 'right', color: variance < 0 ? '#dc3545' : '#28a745', fontWeight: 'bold' }}>{formatKsh(variance)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+
+        {/* SECTION 4: DEBT */}
+        <h3 style={{ fontSize: '16px', borderBottom: '1px solid #ccc', paddingBottom: '5px', marginTop: '30px' }}>4. Branch Account Debt Movement</h3>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px', marginTop: '10px' }}>
+          <thead><tr style={{ backgroundColor: '#f5f5f5', borderBottom: '2px solid #ccc' }}>
+            <th style={{ padding: '10px', textAlign: 'left' }}>Position</th><th style={{ padding: '10px', textAlign: 'left' }}>Date</th><th style={{ padding: '10px', textAlign: 'right' }}>Ksh</th>
+          </tr></thead>
+          <tbody>
+            <tr style={{ borderBottom: '1px solid #eee' }}><td style={{ padding: '10px' }}>Opening Debt</td><td style={{ padding: '10px' }}>{data.openingDebtDate}</td><td style={{ padding: '10px', textAlign: 'right' }}>({formatKsh(data.openingDebt)})</td></tr>
+            <tr style={{ borderBottom: '1px solid #eee' }}><td style={{ padding: '10px' }}>Original Closing Debt</td><td style={{ padding: '10px' }}>{data.closingDebtDate}</td><td style={{ padding: '10px', textAlign: 'right' }}>({formatKsh(data.originalClosingDebt)})</td></tr>
+            <tr style={{ borderBottom: '1px solid #eee' }}><td style={{ padding: '10px' }}>Gross Debt Reduction</td><td style={{ padding: '10px' }}>-</td><td style={{ padding: '10px', textAlign: 'right' }}>{formatKsh(data.debtResults.grossDebtReduction)}</td></tr>
+            <tr style={{ borderBottom: '1px solid #eee' }}><td style={{ padding: '10px' }}>Add: Residual Stock Loss</td><td style={{ padding: '10px' }}>-</td><td style={{ padding: '10px', textAlign: 'right' }}>{formatKsh(data.results.residualStockLoss)}</td></tr>
+            <tr style={{ borderBottom: '1px solid #eee', backgroundColor: '#fafafa' }}><td style={{ padding: '10px', fontWeight: 'bold' }}>Adjusted Closing Debt</td><td style={{ padding: '10px' }}>-</td><td style={{ padding: '10px', textAlign: 'right', fontWeight: 'bold' }}>({formatKsh(data.debtResults.adjustedClosingDebt)})</td></tr>
+            <tr style={{ backgroundColor: '#eef2f5' }}><td style={{ padding: '10px', fontWeight: 'bold' }}>Net Debt Reduction</td><td style={{ padding: '10px' }}>-</td><td style={{ padding: '10px', textAlign: 'right', fontWeight: 'bold', color: '#28a745' }}>{formatKsh(data.debtResults.netDebtReduction)}</td></tr>
+          </tbody>
+        </table>
+
+      </div>
+    );
+  };
+
+  // --- UI ---
   if (authLoading) return <div style={{ padding: '50px', textAlign: 'center' }}>Loading System...</div>;
 
   if (!session) {
@@ -648,8 +723,8 @@ export default function Home() {
                 <button onClick={handleSave} disabled={isSaving} style={{ flex: 1, padding: '15px', backgroundColor: editingReportId ? '#ff9800' : '#0070f3', color: '#fff', fontSize: '16px', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>
                   {isSaving ? 'Saving...' : editingReportId ? 'Update Draft' : 'Save to Database'}
                 </button>
-                <button onClick={() => handleGenerateLivePDF('view')} style={{ flex: 1, padding: '15px', backgroundColor: '#000', color: '#fff', fontSize: '16px', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>
-                  Preview PDF
+                <button onClick={() => setViewingReport(buildLivePreviewData())} style={{ flex: 1, padding: '15px', backgroundColor: '#000', color: '#fff', fontSize: '16px', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>
+                  Preview Report
                 </button>
               </div>
             </div>
@@ -686,7 +761,7 @@ export default function Home() {
                         </span>
                       </td>
                       <td style={{ padding: '10px', display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
-                        <button onClick={() => setViewingReport(r)} style={{ padding: '6px 12px', backgroundColor: '#0070f3', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>View Data</button>
+                        <button onClick={() => setViewingReport(buildHistoryPreviewData(r))} style={{ padding: '6px 12px', backgroundColor: '#0070f3', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>View Report</button>
                         
                         {r.status !== 'Approved' && (
                           <>
@@ -695,7 +770,7 @@ export default function Home() {
                           </>
                         )}
                         
-                        <button onClick={() => handleGenerateHistoryPDF(r, 'view')} style={{ padding: '6px 12px', backgroundColor: '#333', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>Open PDF</button>
+                        <button onClick={() => handleGenerateHistoryPDF(r, 'save')} style={{ padding: '6px 12px', backgroundColor: '#333', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>Download PDF</button>
                       </td>
                     </tr>
                   ))
@@ -706,53 +781,27 @@ export default function Home() {
         </div>
       )}
 
+      {/* FULL SCREEN DOCUMENT VIEWER MODAL */}
       {viewingReport && (
-        <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1000 }}>
-          <div style={{ backgroundColor: '#fff', padding: '30px', borderRadius: '8px', width: '90%', maxWidth: '800px', maxHeight: '90%', overflowY: 'auto' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-              <h2 style={{ margin: 0 }}>Report Details</h2>
-              <button onClick={() => setViewingReport(null)} style={{ padding: '8px 12px', backgroundColor: '#ff4d4f', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>Close</button>
+        <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1000, padding: '20px' }}>
+          <div style={{ position: 'relative', width: '100%', maxWidth: '900px', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+            
+            {/* Top Action Bar */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', marginBottom: '15px' }}>
+               <button onClick={() => setViewingReport(null)} style={{ padding: '10px 20px', backgroundColor: '#fff', color: '#333', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>← Back to List</button>
+               <button onClick={() => {
+                   // We check if viewingReport has an id (it's from history) or not (it's live preview)
+                   if(viewingReport.id) {
+                       handleGenerateHistoryPDF(historicalReports.find(r => r.id === viewingReport.id), 'save');
+                   } else {
+                       generateSmartPDF(viewingReport, 'save');
+                   }
+               }} style={{ padding: '10px 20px', backgroundColor: '#28a745', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>Download Official PDF</button>
             </div>
 
-            <p><strong>Branch:</strong> {viewingReport.branches?.name}</p>
-            <p><strong>Period:</strong> {viewingReport.period_start} to {viewingReport.period_end}</p>
-            <p><strong>Status:</strong> {viewingReport.status}</p>
+            {/* The Document Itself */}
+            {renderDocumentViewer(viewingReport)}
             
-            <hr style={{ margin: '20px 0' }} />
-            
-            <h3>Stock Data</h3>
-            <p>Opening Stock: Ksh {formatKsh(viewingReport.stock_takes?.[0]?.opening_stock || 0)}</p>
-            <p>Physical Stock: Ksh {formatKsh(viewingReport.stock_takes?.[0]?.physical_stock || 0)}</p>
-            
-            <h3 style={{ marginTop: '20px' }}>Debt Data</h3>
-            <p>Opening Debt: Ksh {formatKsh(viewingReport.debt_records?.[0]?.opening_debt || 0)}</p>
-            <p>Original Closing Debt: Ksh {formatKsh(viewingReport.debt_records?.[0]?.original_closing_debt || 0)}</p>
-
-            <h3 style={{ marginTop: '20px' }}>Salespeople</h3>
-            <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '14px', marginTop: '10px' }}>
-              <thead>
-                <tr style={{ borderBottom: '1px solid #ddd', backgroundColor: '#f5f5f5' }}>
-                  <th style={{ padding: '8px' }}>Name</th>
-                  <th style={{ padding: '8px' }}>Actual</th>
-                  <th style={{ padding: '8px' }}>System</th>
-                  <th style={{ padding: '8px' }}>Credit</th>
-                </tr>
-              </thead>
-              <tbody>
-                {viewingReport.sales_records?.map((sr, idx) => (
-                  <tr key={idx} style={{ borderBottom: '1px solid #eee' }}>
-                    <td style={{ padding: '8px' }}>{sr.salespeople?.name}</td>
-                    <td style={{ padding: '8px' }}>{formatKsh(sr.actual_sales)}</td>
-                    <td style={{ padding: '8px' }}>{formatKsh(sr.system_sales)}</td>
-                    <td style={{ padding: '8px' }}>{formatKsh(sr.credit_sales)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            
-            <div style={{ marginTop: '30px', display: 'flex', gap: '10px' }}>
-              <button onClick={() => handleGenerateHistoryPDF(viewingReport, 'save')} style={{ padding: '10px 20px', backgroundColor: '#000', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>Download PDF</button>
-            </div>
           </div>
         </div>
       )}
@@ -761,7 +810,6 @@ export default function Home() {
         <div style={{ padding: '20px', backgroundColor: '#f9f9f9', borderRadius: '8px', border: '1px solid #ddd' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
             <h2 style={{ margin: 0 }}>Company-Wide Consolidated Report</h2>
-            <button onClick={() => alert("Consolidated PDF generation is coming in the next step!")} style={{ padding: '10px 20px', backgroundColor: '#000', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>Download Master PDF</button>
           </div>
           
           {isLoadingData ? <p>Aggregating data...</p> : (
