@@ -11,27 +11,24 @@ export default function Home() {
   const [selectedBranch, setSelectedBranch] = useState('');
   const [isSaving, setIsSaving] = useState(false);
 
-  // Form State - Financial Figures
+  // Core Financials
   const [openingStock, setOpeningStock] = useState('');
   const [physicalStock, setPhysicalStock] = useState('');
-  const [actualSales, setActualSales] = useState('');
-  const [systemSales, setSystemSales] = useState('');
-  const [creditSales, setCreditSales] = useState('');
   const [openingDebt, setOpeningDebt] = useState('');
   const [originalClosingDebt, setOriginalClosingDebt] = useState('');
+  const [unallocatedActual, setUnallocatedActual] = useState('');
+  const [unallocatedSystem, setUnallocatedSystem] = useState('');
+  const [unallocatedCredit, setUnallocatedCredit] = useState('');
 
-  // Form State - Dates
+  // Dates
   const today = new Date().toISOString().split('T')[0];
   const [periodStart, setPeriodStart] = useState(today);
   const [periodEnd, setPeriodEnd] = useState(today);
-  const [valuationDate, setValuationDate] = useState(today);
-  const [physicalCountDate, setPhysicalCountDate] = useState(today);
   const [openingDebtDate, setOpeningDebtDate] = useState(today);
   const [closingDebtDate, setClosingDebtDate] = useState(today);
-  
-  // Reviewers
-  const [preparedBy, setPreparedBy] = useState('');
-  const [reviewedBy, setReviewedBy] = useState('');
+
+  // Salespeople
+  const [staff, setStaff] = useState([{ name: 'Austin', actual: '', system: '', credit: '' }]);
 
   useEffect(() => {
     async function getBranches() {
@@ -42,10 +39,16 @@ export default function Home() {
   }, []);
 
   const num = (val) => parseFloat(val) || 0;
-  const adjustedSystemSales = num(systemSales) - num(creditSales);
+
+  // Aggregate Sales
+  const totalActual = staff.reduce((sum, s) => sum + num(s.actual), 0) + num(unallocatedActual);
+  const totalSystem = staff.reduce((sum, s) => sum + num(s.system), 0) + num(unallocatedSystem);
+  const totalCredit = staff.reduce((sum, s) => sum + num(s.credit), 0) + num(unallocatedCredit);
   
+  const adjustedSystemSales = totalSystem - totalCredit;
+
   const stockAndSalesResults = calculateStockAndSales(
-    num(openingStock), num(physicalStock), num(actualSales), adjustedSystemSales
+    num(openingStock), num(physicalStock), totalActual, adjustedSystemSales
   );
   
   const debtResults = calculateDebt(
@@ -53,30 +56,78 @@ export default function Home() {
   );
 
   const formatKsh = (amount) => new Intl.NumberFormat('en-KE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount);
-  const formatPct = (pct) => pct === null ? 'N/A' : `${pct.toFixed(2)}%`;
+  const formatNum = (amount) => new Intl.NumberFormat('en-KE', { maximumFractionDigits: 0 }).format(amount);
   const branchName = branches.find(b => b.id === selectedBranch)?.name || '';
 
-  const handleSave = async () => {
-    // ... (keep the same save logic as before)
-    if (!selectedBranch) return alert('Please select a branch first.');
-    setIsSaving(true);
-    try {
-      const { data: reportData, error: reportError } = await supabase.from('reports').insert({ branch_id: selectedBranch, period_start: today, period_end: today, period_start_date: periodStart, period_end_date: periodEnd, status: 'Draft' }).select().single();
-      if (reportError) throw reportError;
-      const reportId = reportData.id;
-      await supabase.from('stock_takes').insert({ report_id: reportId, opening_stock: num(openingStock), physical_stock: num(physicalStock), stock_date: today, valuation_date: valuationDate, physical_count_date: physicalCountDate });
-      await supabase.from('debt_records').insert({ report_id: reportId, opening_debt: num(openingDebt), original_closing_debt: num(originalClosingDebt), residual_stock_loss_added: stockAndSalesResults.residualStockLoss, opening_debt_date: openingDebtDate, closing_debt_date: closingDebtDate });
-      const { data: spData } = await supabase.from('salespeople').select('id').eq('branch_id', selectedBranch).limit(1);
-      let spId = spData?.[0]?.id;
-      if (!spId) {
-        const { data: newSp } = await supabase.from('salespeople').insert({ branch_id: selectedBranch, name: 'Branch Aggregate' }).select().single();
-        spId = newSp.id;
-      }
-      await supabase.from('sales_records').insert({ report_id: reportId, salesperson_id: spId, actual_sales: num(actualSales), system_sales: num(systemSales), credit_sales: num(creditSales) });
-      alert('Report saved successfully!');
-    } catch (err) { alert('Error saving: ' + err.message); } finally { setIsSaving(false); }
+  // --- DYNAMIC STAFF HANDLING ---
+  const handleStaffChange = (index, field, value) => {
+    const newStaff = [...staff];
+    newStaff[index][field] = value;
+    setStaff(newStaff);
   };
 
+  const addStaff = () => setStaff([...staff, { name: '', actual: '', system: '', credit: '' }]);
+  const removeStaff = (index) => setStaff(staff.filter((_, i) => i !== index));
+
+  // --- NATIVE PDF CHART ENGINE ---
+  const drawBarChart = (doc, startX, startY, width, height, data, title, yLabel) => {
+    // Determine max value for scaling
+    let maxVal = 0;
+    data.forEach(d => {
+      if (d.val1 > maxVal) maxVal = d.val1;
+      if (d.val2 > maxVal) maxVal = d.val2;
+    });
+    if (maxVal === 0) maxVal = 1;
+
+    // Draw Title
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'bold');
+    doc.text(title, startX + width / 2, startY - 5, { align: 'center' });
+
+    // Draw Axes
+    doc.setDrawColor(0);
+    doc.line(startX, startY + height, startX, startY); // Y-axis
+    doc.line(startX, startY + height, startX + width, startY + height); // X-axis
+
+    // Draw Y-axis Labels (approximate)
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'normal');
+    doc.text(formatNum(maxVal), startX - 5, startY + 5, { align: 'right' });
+    doc.text('0', startX - 5, startY + height, { align: 'right' });
+
+    // Draw Bars
+    const barGroupWidth = width / data.length;
+    const barWidth = (barGroupWidth * 0.8) / 2;
+    
+    data.forEach((d, i) => {
+      const groupX = startX + (i * barGroupWidth) + (barGroupWidth * 0.1);
+      
+      // Bar 1 (Actual / Before)
+      const h1 = (d.val1 / maxVal) * height;
+      doc.setFillColor(50, 50, 50); // Dark gray
+      doc.rect(groupX, startY + height - h1, barWidth, h1, 'F');
+      
+      // Bar 2 (System / After)
+      const h2 = (d.val2 / maxVal) * height;
+      doc.setFillColor(150, 150, 150); // Light gray
+      doc.rect(groupX + barWidth + 2, startY + height - h2, barWidth, h2, 'F');
+
+      // X-axis Label
+      doc.setFontSize(8);
+      doc.text(d.label, groupX + barWidth, startY + height + 5, { align: 'center' });
+    });
+
+    // Legend
+    doc.setFillColor(50, 50, 50);
+    doc.rect(startX + width - 60, startY - 15, 5, 5, 'F');
+    doc.text('Actual/Before', startX + width - 52, startY - 10);
+    
+    doc.setFillColor(150, 150, 150);
+    doc.rect(startX + width - 60, startY - 8, 5, 5, 'F');
+    doc.text('System/After', startX + width - 52, startY - 3);
+  };
+
+  // --- PDF GENERATION ---
   const generatePDF = () => {
     if (!selectedBranch) return alert('Please select a branch first.');
     
@@ -84,246 +135,266 @@ export default function Home() {
     const pageWidth = doc.internal.pageSize.getWidth();
     const pageHeight = doc.internal.pageSize.getHeight();
 
-    // --- HEADER ---
-    doc.setFontSize(18);
+    // HEADER
+    doc.setFontSize(16);
     doc.setFont('helvetica', 'bold');
     doc.text('MEDIOCARE PHARMACEUTICALS LTD', pageWidth / 2, 20, { align: 'center' });
-    
-    doc.setFontSize(14);
-    doc.text(`${branchName.toUpperCase()} — STOCK CONTROL & FINANCIAL REPORT`, pageWidth / 2, 30, { align: 'center' });
-    
-    doc.setFontSize(10);
+    doc.setFontSize(12);
+    doc.text(`${branchName.toUpperCase()} — STOCK CONTROL & FINANCIAL REPORT`, pageWidth / 2, 28, { align: 'center' });
+    doc.setFontSize(9);
     doc.setFont('helvetica', 'normal');
-    doc.text(`Reporting Period: ${periodStart} to ${periodEnd} | Currency: Kenya Shillings (KSh)`, pageWidth / 2, 38, { align: 'center' });
+    doc.text(`Reporting Period: ${periodStart} to ${periodEnd}`, pageWidth / 2, 34, { align: 'center' });
 
-    // --- SECTION 1: EXECUTIVE SUMMARY ---
-    doc.setFontSize(12);
+    // 1. EXECUTIVE SUMMARY
+    doc.setFontSize(11);
     doc.setFont('helvetica', 'bold');
-    doc.text('1. Executive Summary', 14, 50);
+    doc.text('1. Executive Summary', 14, 45);
+    
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'normal');
+    let summaryY = 52;
+    
+    // Dynamic summary text
+    const varType = stockAndSalesResults.salesVariance >= 0 ? 'surplus' : 'shortage';
+    const stockType = stockAndSalesResults.grossStockVariance >= 0 ? 'loss' : 'surplus';
+    
+    doc.text(`• Credit-adjusted sales ${varType}: Ksh ${formatKsh(Math.abs(stockAndSalesResults.salesVariance))}`, 14, summaryY); summaryY += 6;
+    doc.text(`• Stock ${stockType}: Ksh ${formatKsh(Math.abs(stockAndSalesResults.grossStockVariance))}; offset by sales variance.`, 14, summaryY); summaryY += 6;
+    doc.text(`• Residual stock loss: Ksh ${formatKsh(stockAndSalesResults.residualStockLoss)}`, 14, summaryY); summaryY += 6;
+    doc.text(`• Debt reduced by Ksh ${formatKsh(debtResults.netDebtReduction)} to Ksh ${formatKsh(debtResults.adjustedClosingDebt)}.`, 14, summaryY); summaryY += 6;
+
+    // 2. STOCK POSITION AND OFFSET
+    doc.setFontSize(11);
+    doc.setFont('helvetica', 'bold');
+    doc.text('2. Stock Position and Offset', 14, summaryY + 5);
     
     autoTable(doc, {
-      startY: 55,
-      head: [['Key Metric', 'Amount (KSh)']],
+      startY: summaryY + 10,
+      head: [['Item', 'Ksh', 'Note']],
       body: [
-        ['Actual Sales', formatKsh(num(actualSales))],
-        ['Adjusted System Sales', formatKsh(adjustedSystemSales)],
-        ['Sales Variance', formatKsh(stockAndSalesResults.salesVariance)],
-        ['Gross Stock Variance', formatKsh(stockAndSalesResults.grossStockVariance)],
-        ['Residual Stock Loss', formatKsh(stockAndSalesResults.residualStockLoss)],
-        ['Original Closing Debt', formatKsh(num(originalClosingDebt))],
-        ['Adjusted Closing Debt', formatKsh(debtResults.adjustedClosingDebt)],
-        ['Net Debt Reduction', formatKsh(debtResults.netDebtReduction)],
+        ['Stock before stock take', formatKsh(num(openingStock)), 'Opening'],
+        ['Stock after stock take', formatKsh(num(physicalStock)), 'Closing'],
+        ['Stock loss/surplus', formatKsh(stockAndSalesResults.grossStockVariance), `${(stockAndSalesResults.stockVariancePercentage || 0).toFixed(2)}% of opening`],
+        ['Sales surplus/shortage available', formatKsh(stockAndSalesResults.salesVariance), 'Credit-adjusted'],
+        ['Less: applied to stock loss', `(${formatKsh(stockAndSalesResults.salesOffset)})`, 'Full offset' ],
+        ['Residual stock loss', formatKsh(stockAndSalesResults.residualStockLoss), 'After offset'],
       ],
       theme: 'grid',
-      headStyles: { fillColor: [34, 49, 63] },
-      styles: { fontSize: 10 }
+      headStyles: { fillColor: [0, 51, 102] },
+      styles: { fontSize: 8 }
     });
 
-    // --- SECTION 2: STOCK VALUATION ANALYSIS ---
-    let currentY = doc.lastAutoTable.finalY + 15;
-    doc.setFontSize(12);
-    doc.setFont('helvetica', 'bold');
-    doc.text('2. Stock Valuation Analysis', 14, currentY);
+    // 3. SALES RECONCILIATION (CREDIT-ADJUSTED)
+    doc.setFontSize(11);
+    doc.text('3. Sales Reconciliation (Credit-Adjusted)', 14, doc.lastAutoTable.finalY + 10);
     
+    const salesTableBody = staff.map(s => {
+      const adjSys = num(s.system) - num(s.credit);
+      const variance = num(s.actual) - adjSys;
+      return [s.name, formatKsh(num(s.actual)), formatKsh(num(s.system)), formatKsh(num(s.credit)), formatKsh(adjSys), formatKsh(variance)];
+    });
+    
+    // Add unallocated and total
+    salesTableBody.push(['Unallocated', formatKsh(num(unallocatedActual)), formatKsh(num(unallocatedSystem)), formatKsh(num(unallocatedCredit)), formatKsh(num(unallocatedSystem) - num(unallocatedCredit)), formatKsh(num(unallocatedActual) - (num(unallocatedSystem) - num(unallocatedCredit)))]);
+    salesTableBody.push(['Branch Total', formatKsh(totalActual), formatKsh(totalSystem), formatKsh(totalCredit), formatKsh(adjustedSystemSales), formatKsh(stockAndSalesResults.salesVariance)]);
+
     autoTable(doc, {
-      startY: currentY + 5,
-      head: [['Description', 'Date', 'Amount (KSh)']],
-      body: [
-        ['Book Stock before Stock Take', valuationDate, formatKsh(num(openingStock))],
-        ['Physical Stock after Stock Take', physicalCountDate, formatKsh(num(physicalStock))],
-        ['Gross Stock Variance', '-', formatKsh(stockAndSalesResults.grossStockVariance)],
-        ['Stock Variance Percentage', '-', formatPct(stockAndSalesResults.stockVariancePercentage)],
-      ],
+      startY: doc.lastAutoTable.finalY + 15,
+      head: [['Staff', 'Actual Cash', 'System Sales', 'Credit Sales', 'Adj. System', 'Variance']],
+      body: salesTableBody,
       theme: 'striped',
       headStyles: { fillColor: [41, 128, 185] },
-      styles: { fontSize: 10 }
+      styles: { fontSize: 8 }
     });
 
-    // --- SECTION 3: SALES PERFORMANCE ---
-    currentY = doc.lastAutoTable.finalY + 15;
-    doc.setFontSize(12);
-    doc.text('3. Sales Performance Analysis', 14, currentY);
+    // 4. DEBT POSITION
+    doc.setFontSize(11);
+    doc.setFont('helvetica', 'bold');
+    doc.text('4. Branch Account Debt Movement', 14, doc.lastAutoTable.finalY + 10);
 
     autoTable(doc, {
-      startY: currentY + 5,
-      head: [['Description', 'Amount (KSh)']],
+      startY: doc.lastAutoTable.finalY + 15,
+      head: [['Position', 'Ksh', 'Change %']],
       body: [
-        ['Actual Sales', formatKsh(num(actualSales))],
-        ['System Sales (Original)', formatKsh(num(systemSales))],
-        ['Less: Credit Sales Included', `(${formatKsh(num(creditSales))})`],
-        ['Adjusted System Sales', formatKsh(adjustedSystemSales)],
-        ['Sales Variance', formatKsh(stockAndSalesResults.salesVariance)],
-        ['Sales Variance Percentage', formatPct(stockAndSalesResults.salesVariancePercentage)],
-      ],
-      theme: 'striped',
-      headStyles: { fillColor: [41, 128, 185] },
-      styles: { fontSize: 10 }
-    });
-
-    // --- SECTION 4: RECONCILIATION ---
-    currentY = doc.lastAutoTable.finalY + 15;
-    doc.setFontSize(12);
-    doc.text('4. Stock Loss & Sales Variance Reconciliation', 14, currentY);
-
-    autoTable(doc, {
-      startY: currentY + 5,
-      head: [['Calculation Step', 'Amount (KSh)']],
-      body: [
-        ['Gross Stock Shortage', formatKsh(stockAndSalesResults.grossStockShortage)],
-        ['Positive Sales Variance Available', formatKsh(stockAndSalesResults.positiveSalesVariance)],
-        ['Sales Variance Applied to Offset', formatKsh(stockAndSalesResults.salesOffset)],
-        ['Residual Stock Loss', formatKsh(stockAndSalesResults.residualStockLoss)],
-        ['Remaining Sales Surplus', formatKsh(stockAndSalesResults.remainingSalesSurplus)],
+        [`Standing debt as at ${openingDebtDate}`, `(${formatKsh(num(openingDebt))})`, '—'],
+        [`Standing debt as at ${closingDebtDate}`, `(${formatKsh(num(originalClosingDebt))})`, '—'],
+        ['Net debt reduction (original)', formatKsh(debtResults.grossDebtReduction), `${(debtResults.debtReductionPercentage || 0).toFixed(2)}%`],
+        ['Add: Residual stock loss', formatKsh(stockAndSalesResults.residualStockLoss), 'Absorbed'],
+        ['Adjusted closing debt', `(${formatKsh(debtResults.adjustedClosingDebt)})`, 'Adjusted'],
+        ['Actual Net Reduction', formatKsh(debtResults.netDebtReduction), `${((debtResults.netDebtReduction / num(openingDebt)) * 100 || 0).toFixed(2)}%`],
       ],
       theme: 'grid',
-      headStyles: { fillColor: [192, 57, 43] }, // Red for loss
-      styles: { fontSize: 10 }
+      headStyles: { fillColor: [39, 174, 96] },
+      styles: { fontSize: 8 }
     });
 
-    // --- SECTION 5: DEBT MOVEMENT ---
-    currentY = doc.lastAutoTable.finalY + 15;
+    // 5. GRAPHICAL ANALYSIS (NEW PAGE)
+    doc.addPage();
     doc.setFontSize(12);
-    doc.text('5. Branch Debt Movement', 14, currentY);
+    doc.setFont('helvetica', 'bold');
+    doc.text('5. Graphical Analysis', 14, 20);
 
-    autoTable(doc, {
-      startY: currentY + 5,
-      head: [['Description', 'Date', 'Amount (KSh)']],
-      body: [
-        ['Opening Branch Debt', openingDebtDate, formatKsh(num(openingDebt))],
-        ['Original Closing Debt', closingDebtDate, formatKsh(num(originalClosingDebt))],
-        ['Gross Debt Reduction', '-', formatKsh(debtResults.grossDebtReduction)],
-        ['Add: Residual Stock Loss', '-', formatKsh(stockAndSalesResults.residualStockLoss)],
-        ['Adjusted Closing Debt', '-', formatKsh(debtResults.adjustedClosingDebt)],
-        ['Net Debt Reduction', '-', formatKsh(debtResults.netDebtReduction)],
-        ['Net Debt Reduction Percentage', '-', formatPct(debtResults.debtReductionPercentage)],
-      ],
-      theme: 'striped',
-      headStyles: { fillColor: [39, 174, 96] }, // Green for debt
-      styles: { fontSize: 10 }
-    });
+    // Chart 1: Sales (Actual vs Adjusted System per person)
+    const salesChartData = staff.slice(0, 5).map(s => ({
+      label: s.name.substring(0, 8),
+      val1: num(s.actual),
+      val2: num(s.system) - num(s.credit)
+    }));
+    // Add Branch total to chart
+    salesChartData.push({ label: 'Branch', val1: totalActual, val2: adjustedSystemSales });
 
-    // --- SECTION 6: APPROVAL ---
-    currentY = doc.lastAutoTable.finalY + 20;
-    
-    // Check if we need a new page for signatures
-    if (currentY > pageHeight - 50) {
-      doc.addPage();
-      currentY = 20;
+    drawBarChart(doc, 20, 40, 170, 60, salesChartData, 'Individual Sales: Actual vs Adjusted System', 'Ksh');
+
+    // Chart 2: Stock and Debt
+    drawBarChart(doc, 20, 130, 80, 50, [
+      { label: 'Before', val1: num(openingStock), val2: 0 },
+      { label: 'After', val1: num(physicalStock), val2: 0 }
+    ], 'Stock Value Movement', 'Ksh');
+
+    drawBarChart(doc, 110, 130, 80, 50, [
+      { label: 'Opening', val1: num(openingDebt), val2: 0 },
+      { label: 'Adjusted', val1: debtResults.adjustedClosingDebt, val2: 0 }
+    ], 'Debt Movement', 'Ksh');
+
+    // Footer on every page
+    const pageCount = doc.internal.getNumberOfPages();
+    for (let i = 1; i <= pageCount; i++) {
+      doc.setPage(i);
+      doc.setFontSize(8);
+      doc.setTextColor(150);
+      doc.text(`Generated on ${new Date().toLocaleString()} | Page ${i} of ${pageCount}`, pageWidth / 2, pageHeight - 10, { align: 'center' });
     }
-
-    doc.setFontSize(12);
-    doc.text('6. Approval and Audit Trail', 14, currentY);
-
-    doc.setFontSize(10);
-    doc.setFont('helvetica', 'normal');
-    doc.text(`Prepared by: ${preparedBy || '_______________________'}`, 14, currentY + 15);
-    doc.text(`Date: ${today}`, 14, currentY + 22);
-
-    doc.text(`Reviewed by: ${reviewedBy || '_______________________'}`, 120, currentY + 15);
-    doc.text(`Date: ___________________`, 120, currentY + 22);
-
-    // Footer
-    doc.setFontSize(8);
-    doc.setTextColor(150);
-    doc.text(`Report generated on ${new Date().toLocaleString()} | Mediocare Pharmaceuticals Ltd`, pageWidth / 2, pageHeight - 10, { align: 'center' });
 
     doc.save(`${branchName}_Financial_Report.pdf`);
   };
 
-  const inputStyle = { width: '100%', padding: '8px', marginBottom: '15px', border: '1px solid #ccc', borderRadius: '4px' };
-  const labelStyle = { display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' };
-  const cardStyle = { padding: '20px', backgroundColor: '#f9f9f9', borderRadius: '8px', marginBottom: '20px', border: '1px solid #ddd' };
+  const inputStyle = { width: '100%', padding: '8px', marginBottom: '10px', border: '1px solid #ccc', borderRadius: '4px' };
+  const labelStyle = { display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '12px' };
+  const cardStyle = { padding: '15px', backgroundColor: '#f9f9f9', borderRadius: '8px', marginBottom: '15px', border: '1px solid #ddd' };
 
   return (
-    <main style={{ maxWidth: '1000px', margin: '40px auto', fontFamily: 'system-ui', padding: '0 20px' }}>
+    <main style={{ maxWidth: '1100px', margin: '40px auto', fontFamily: 'system-ui', padding: '0 20px' }}>
       <h1 style={{ borderBottom: '2px solid #333', paddingBottom: '10px' }}>Mediocare Stock Control</h1>
       
-      <div style={{ marginBottom: '20px', display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
-        <div>
-          <label style={labelStyle}>Select Branch</label>
-          <select value={selectedBranch} onChange={(e) => setSelectedBranch(e.target.value)} style={{ padding: '10px', width: '300px', fontSize: '16px' }}>
-            <option value="">-- Choose a Branch --</option>
-            {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-          </select>
-        </div>
-        <div>
-          <label style={labelStyle}>Reporting Period Start</label>
-          <input type="date" value={periodStart} onChange={e => setPeriodStart(e.target.value)} style={{ padding: '10px', width: '200px', fontSize: '16px' }} />
-        </div>
-        <div>
-          <label style={labelStyle}>Reporting Period End</label>
-          <input type="date" value={periodEnd} onChange={e => setPeriodEnd(e.target.value)} style={{ padding: '10px', width: '200px', fontSize: '16px' }} />
+      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '20px', marginBottom: '20px' }}>
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <div style={{ flex: 1 }}>
+            <label style={labelStyle}>Branch</label>
+            <select value={selectedBranch} onChange={(e) => setSelectedBranch(e.target.value)} style={inputStyle}>
+              <option value="">-- Choose --</option>
+              {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+            </select>
+          </div>
+          <div style={{ flex: 1 }}>
+            <label style={labelStyle}>Start Date</label>
+            <input type="date" value={periodStart} onChange={e => setPeriodStart(e.target.value)} style={inputStyle} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <label style={labelStyle}>End Date</label>
+            <input type="date" value={periodEnd} onChange={e => setPeriodEnd(e.target.value)} style={inputStyle} />
+          </div>
         </div>
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+        
+        {/* LEFT COLUMN: INPUTS */}
         <div>
           <div style={cardStyle}>
-            <h3>1. Stock Data</h3>
-            <label style={labelStyle}>Opening Stock Valuation Date</label>
-            <input type="date" value={valuationDate} onChange={e => setValuationDate(e.target.value)} style={inputStyle} />
-            <label style={labelStyle}>Opening Stock (KSh)</label>
+            <h3 style={{ marginTop: 0 }}>1. Stock Data</h3>
+            <label style={labelStyle}>Opening Stock (Ksh)</label>
             <input type="number" value={openingStock} onChange={e => setOpeningStock(e.target.value)} style={inputStyle} />
-            
-            <label style={labelStyle}>Physical Stock Count Date</label>
-            <input type="date" value={physicalCountDate} onChange={e => setPhysicalCountDate(e.target.value)} style={inputStyle} />
-            <label style={labelStyle}>Physical Stock (KSh)</label>
+            <label style={labelStyle}>Physical Stock (Ksh)</label>
             <input type="number" value={physicalStock} onChange={e => setPhysicalStock(e.target.value)} style={inputStyle} />
           </div>
 
           <div style={cardStyle}>
-            <h3>2. Sales Data</h3>
-            <label style={labelStyle}>Actual Sales (KSh)</label>
-            <input type="number" value={actualSales} onChange={e => setActualSales(e.target.value)} style={inputStyle} />
-            <label style={labelStyle}>System Sales (KSh)</label>
-            <input type="number" value={systemSales} onChange={e => setSystemSales(e.target.value)} style={inputStyle} />
-            <label style={labelStyle}>Credit Sales included (KSh)</label>
-            <input type="number" value={creditSales} onChange={e => setCreditSales(e.target.value)} style={inputStyle} />
+            <h3 style={{ marginTop: 0 }}>2. Debt Data</h3>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>Opening Debt Date</label>
+                <input type="date" value={openingDebtDate} onChange={e => setOpeningDebtDate(e.target.value)} style={inputStyle} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>Opening Debt (Ksh)</label>
+                <input type="number" value={openingDebt} onChange={e => setOpeningDebt(e.target.value)} style={inputStyle} />
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>Closing Debt Date</label>
+                <input type="date" value={closingDebtDate} onChange={e => setClosingDebtDate(e.target.value)} style={inputStyle} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>Original Closing Debt (Ksh)</label>
+                <input type="number" value={originalClosingDebt} onChange={e => setOriginalClosingDebt(e.target.value)} style={inputStyle} />
+              </div>
+            </div>
           </div>
-
+          
           <div style={cardStyle}>
-            <h3>3. Debt Data</h3>
-            <label style={labelStyle}>Opening Debt Date</label>
-            <input type="date" value={openingDebtDate} onChange={e => setOpeningDebtDate(e.target.value)} style={inputStyle} />
-            <label style={labelStyle}>Opening Debt (KSh)</label>
-            <input type="number" value={openingDebt} onChange={e => setOpeningDebt(e.target.value)} style={inputStyle} />
-
-            <label style={labelStyle}>Closing Debt Date</label>
-            <input type="date" value={closingDebtDate} onChange={e => setClosingDebtDate(e.target.value)} style={inputStyle} />
-            <label style={labelStyle}>Original Closing Debt (KSh)</label>
-            <input type="number" value={originalClosingDebt} onChange={e => setOriginalClosingDebt(e.target.value)} style={inputStyle} />
-          </div>
-
-          <div style={cardStyle}>
-            <h3>4. Approval Details</h3>
-            <label style={labelStyle}>Prepared By</label>
-            <input type="text" value={preparedBy} onChange={e => setPreparedBy(e.target.value)} style={inputStyle} placeholder="Staff Name" />
-            <label style={labelStyle}>Reviewed By</label>
-            <input type="text" value={reviewedBy} onChange={e => setReviewedBy(e.target.value)} style={inputStyle} placeholder="Manager Name" />
+            <h3 style={{ marginTop: 0 }}>3. Unallocated Sales</h3>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>Actual Cash</label>
+                <input type="number" value={unallocatedActual} onChange={e => setUnallocatedActual(e.target.value)} style={inputStyle} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>System Sales</label>
+                <input type="number" value={unallocatedSystem} onChange={e => setUnallocatedSystem(e.target.value)} style={inputStyle} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>Credit Sales</label>
+                <input type="number" value={unallocatedCredit} onChange={e => setUnallocatedCredit(e.target.value)} style={inputStyle} />
+              </div>
+            </div>
           </div>
         </div>
 
+        {/* RIGHT COLUMN: STAFF & RESULTS */}
         <div>
+          <div style={cardStyle}>
+            <h3 style={{ marginTop: 0, display: 'flex', justifyContent: 'space-between' }}>
+              4. Salespeople
+              <button onClick={addStaff} style={{ padding: '5px 10px', cursor: 'pointer' }}>+ Add Row</button>
+            </h3>
+            {staff.map((s, i) => (
+              <div key={i} style={{ display: 'flex', gap: '5px', marginBottom: '10px', alignItems: 'flex-end' }}>
+                <div style={{ flex: 2 }}>
+                  <label style={labelStyle}>Name</label>
+                  <input type="text" value={s.name} onChange={e => handleStaffChange(i, 'name', e.target.value)} style={inputStyle} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label style={labelStyle}>Actual</label>
+                  <input type="number" value={s.actual} onChange={e => handleStaffChange(i, 'actual', e.target.value)} style={inputStyle} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label style={labelStyle}>System</label>
+                  <input type="number" value={s.system} onChange={e => handleStaffChange(i, 'system', e.target.value)} style={inputStyle} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label style={labelStyle}>Credit</label>
+                  <input type="number" value={s.credit} onChange={e => handleStaffChange(i, 'credit', e.target.value)} style={inputStyle} />
+                </div>
+                <button onClick={() => removeStaff(i)} style={{ padding: '8px', backgroundColor: '#ff4d4f', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', marginBottom: '10px' }}>X</button>
+              </div>
+            ))}
+          </div>
+
           <div style={{ ...cardStyle, backgroundColor: '#eef2f5' }}>
-            <h3>Reconciliation Results</h3>
-            <p><strong>Gross Stock Variance:</strong> KSh {formatKsh(stockAndSalesResults.grossStockVariance)} ({formatPct(stockAndSalesResults.stockVariancePercentage)})</p>
-            <p><strong>Sales Variance:</strong> KSh {formatKsh(stockAndSalesResults.salesVariance)} ({formatPct(stockAndSalesResults.salesVariancePercentage)})</p>
-            <hr style={{ margin: '15px 0', borderTop: '1px solid #ccc' }} />
-            <p><strong>Gross Stock Shortage:</strong> KSh {formatKsh(stockAndSalesResults.grossStockShortage)}</p>
-            <p><strong>Sales Offset Applied:</strong> KSh {formatKsh(stockAndSalesResults.salesOffset)}</p>
-            <p style={{ color: stockAndSalesResults.residualStockLoss > 0 ? 'red' : 'green', fontSize: '18px' }}>
-              <strong>Residual Stock Loss:</strong> KSh {formatKsh(stockAndSalesResults.residualStockLoss)}
-            </p>
-            <hr style={{ margin: '15px 0', borderTop: '1px solid #ccc' }} />
-            <p><strong>Adjusted Closing Debt:</strong> KSh {formatKsh(debtResults.adjustedClosingDebt)}</p>
-            <p style={{ color: 'green', fontSize: '18px' }}><strong>Net Debt Reduction:</strong> KSh {formatKsh(debtResults.netDebtReduction)} ({formatPct(debtResults.debtReductionPercentage)})</p>
+            <h3 style={{ marginTop: 0 }}>Live Results</h3>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', fontSize: '14px' }}>
+              <div><strong>Total Actual:</strong> Ksh {formatKsh(totalActual)}</div>
+              <div><strong>Adj. System:</strong> Ksh {formatKsh(adjustedSystemSales)}</div>
+              <div><strong>Gross Stock Var:</strong> Ksh {formatKsh(stockAndSalesResults.grossStockVariance)}</div>
+              <div><strong>Sales Variance:</strong> Ksh {formatKsh(stockAndSalesResults.salesVariance)}</div>
+              <div style={{ color: 'red' }}><strong>Residual Loss:</strong> Ksh {formatKsh(stockAndSalesResults.residualStockLoss)}</div>
+              <div style={{ color: 'green' }}><strong>Adj. Debt:</strong> Ksh {formatKsh(debtResults.adjustedClosingDebt)}</div>
+            </div>
           </div>
           
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            <button onClick={handleSave} disabled={isSaving} style={{ width: '100%', padding: '15px', backgroundColor: '#0070f3', color: '#fff', fontSize: '16px', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
-              {isSaving ? 'Saving...' : 'Save Draft to Database'}
-            </button>
-            <button onClick={generatePDF} style={{ width: '100%', padding: '15px', backgroundColor: '#000', color: '#fff', fontSize: '16px', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
+            <button onClick={generatePDF} style={{ width: '100%', padding: '15px', backgroundColor: '#000', color: '#fff', fontSize: '16px', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>
               Download Professional PDF Report
             </button>
           </div>
