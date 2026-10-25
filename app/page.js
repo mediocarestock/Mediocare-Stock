@@ -30,9 +30,13 @@ export default function Home() {
   // --- CREATE / EDIT REPORT STATE ---
   const [editingReportId, setEditingReportId] = useState(null);
   const [selectedBranch, setSelectedBranch] = useState('');
-  const [previousClosingStock, setPreviousClosingStock] = useState(null); // NEW: Tracks last month's closing stock
+  
+  // Stock Data
+  const [prevClosingStock, setPrevClosingStock] = useState(''); // Manual Input
   const [openingStock, setOpeningStock] = useState('');
   const [physicalStock, setPhysicalStock] = useState('');
+  
+  // Debt Data
   const [openingDebt, setOpeningDebt] = useState('');
   const [originalClosingDebt, setOriginalClosingDebt] = useState('');
   
@@ -41,11 +45,14 @@ export default function Home() {
   const [branchSystem, setBranchSystem] = useState('');
   const [branchCredit, setBranchCredit] = useState('');
 
+  // Dates
   const today = new Date().toISOString().split('T')[0];
   const [periodStart, setPeriodStart] = useState(today);
   const [periodEnd, setPeriodEnd] = useState(today);
   const [openingDebtDate, setOpeningDebtDate] = useState(today);
   const [closingDebtDate, setClosingDebtDate] = useState(today);
+  
+  // Salespeople
   const [staff, setStaff] = useState([{ name: '', actual: '', system: '', credit: '' }]);
 
   // --- HISTORY & CONSOLIDATED STATE ---
@@ -76,13 +83,6 @@ export default function Home() {
     }
   }, [session]);
 
-  // Fetch Previous Closing Stock when Branch changes
-  useEffect(() => {
-    if (selectedBranch && !editingReportId) {
-      fetchPreviousStock(selectedBranch);
-    }
-  }, [selectedBranch, editingReportId]);
-
   useEffect(() => {
     if (activeTab === 'dashboard') fetchDashboardData();
     if (activeTab === 'history') fetchHistory();
@@ -93,25 +93,6 @@ export default function Home() {
   const num = (val) => parseFloat(val) || 0;
   const formatKsh = (amount) => new Intl.NumberFormat('en-KE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount);
   const formatNum = (amount) => new Intl.NumberFormat('en-KE', { maximumFractionDigits: 0 }).format(amount);
-
-  const fetchPreviousStock = async (branchId) => {
-    const { data } = await supabase
-      .from('reports')
-      .select('period_start, stock_takes(physical_stock)')
-      .eq('branch_id', branchId)
-      .lt('period_start', periodStart) // Only look at past reports
-      .order('period_start', { ascending: false })
-      .limit(1);
-      
-    if (data && data.length > 0 && data[0].stock_takes && data[0].stock_takes.length > 0) {
-      setPreviousClosingStock({
-        amount: data[0].stock_takes[0].physical_stock,
-        date: data[0].period_start
-      });
-    } else {
-      setPreviousClosingStock(null);
-    }
-  };
 
   const handleCSVUpload = (e) => {
     const file = e.target.files[0];
@@ -207,7 +188,7 @@ export default function Home() {
     setOpeningDebt(''); setOriginalClosingDebt(''); setStaff([{ name: '', actual: '', system: '', credit: '' }]);
     setPeriodStart(today); setPeriodEnd(today);
     setBranchActual(''); setBranchSystem(''); setBranchCredit('');
-    setPreviousClosingStock(null);
+    setPrevClosingStock('');
   };
 
   const handleEditReport = (report) => {
@@ -228,6 +209,9 @@ export default function Home() {
     setBranchActual(report.branch_actual_sales || '');
     setBranchSystem(report.branch_system_sales || '');
     setBranchCredit(report.branch_credit_sales || '');
+
+    // We clear the manual previous stock on edit so they can re-enter if needed
+    setPrevClosingStock('');
 
     if (report.sales_records && report.sales_records.length > 0) {
       setStaff(report.sales_records.map(sr => ({
@@ -328,7 +312,7 @@ export default function Home() {
   };
 
   // --- SHARED DATA BUILDER ---
-  const buildReportData = (isHistory = false, report = null, prevStockData = null) => {
+  const buildReportData = (isHistory = false, report = null) => {
     if (isHistory) {
       const oStk = report.stock_takes?.[0]?.opening_stock || 0;
       const pStk = report.stock_takes?.[0]?.physical_stock || 0;
@@ -354,7 +338,7 @@ export default function Home() {
         closingDebtDate: report.debt_records?.[0]?.closing_debt_date || 'N/A',
         results, debtResults, staff: staffData,
         branchActual: tAct, branchSystem: tSys, branchCredit: tCre,
-        previousStock: prevStockData // Passed from history if available
+        previousStock: null // We don't store manual previous stock in DB for now, so history view won't show the progress analysis
       };
     } else {
       return {
@@ -364,7 +348,7 @@ export default function Home() {
         openingDebtDate, closingDebtDate, results: stockAndSalesResults, debtResults,
         staff: staff.map(s => ({ name: s.name || 'Unnamed', actual: num(s.actual), system: num(s.system), credit: num(s.credit) })),
         branchActual: finalBranchActual, branchSystem: finalBranchSystem, branchCredit: finalBranchCredit,
-        previousStock: previousClosingStock
+        previousStock: num(prevClosingStock) > 0 ? { amount: num(prevClosingStock), date: 'Previous Period (Manual)' } : null
       };
     }
   };
@@ -410,7 +394,7 @@ export default function Home() {
       let debtTrend = debtChange > 0 ? `increased by Ksh ${formatKsh(Math.abs(debtChange))}` : debtChange < 0 ? `reduced by Ksh ${formatKsh(Math.abs(debtChange))}` : 'remained stagnant';
 
       notes.push(`-- BRANCH PROGRESS ANALYSIS --`);
-      notes.push(`Compared to the previous closing stock of Ksh ${formatKsh(prevStockVal)} (${data.previousStock.date}), the current closing stock has ${stockTrend}. Over the same period, the adjusted branch debt has ${debtTrend} (Opening: Ksh ${formatKsh(data.openingDebt)} -> Adjusted Closing: Ksh ${formatKsh(data.debtResults.adjustedClosingDebt)}).`);
+      notes.push(`Compared to the previous closing stock of Ksh ${formatKsh(prevStockVal)}, the current closing stock has ${stockTrend}. Over the same period, the adjusted branch debt has ${debtTrend} (Opening: Ksh ${formatKsh(data.openingDebt)} -> Adjusted Closing: Ksh ${formatKsh(data.debtResults.adjustedClosingDebt)}).`);
 
       if (stockChange >= 0 && debtChange < 0) {
         notes.push(`DIAGNOSIS: EXCELLENT PROGRESS. The branch successfully increased its physical stock holding while simultaneously reducing its debt to Head Office. This indicates strong sales, good collections, and proper capital management.`);
@@ -421,9 +405,6 @@ export default function Home() {
       } else if (stockChange < 0 && debtChange >= 0) {
         notes.push(`DIAGNOSIS: CRITICAL RISK. The branch's stock has depleted, yet its debt has increased. This indicates that stock is leaving the branch without corresponding cash remittances. This is a major red flag for unrecorded sales, pilferage, or significant uncollected credit sales. Immediate investigation is required.`);
       }
-    } else {
-      notes.push(`-- BRANCH PROGRESS ANALYSIS --`);
-      notes.push(`No previous stock report found for this branch. Cannot perform period-on-period stock vs. debt progress analysis.`);
     }
 
     return notes;
@@ -691,13 +672,12 @@ export default function Home() {
               <div style={{ padding: '20px', backgroundColor: '#f9f9f9', borderRadius: '8px', marginBottom: '20px', border: '1px solid #ddd' }}>
                 <h3 style={{ marginTop: 0 }}>1. Stock & Debt Core</h3>
                 
-                {/* PREVIOUS CLOSING STOCK BANNER */}
-                {previousClosingStock && (
-                  <div style={{ padding: '10px', backgroundColor: '#eef2f5', borderLeft: '4px solid #0070f3', marginBottom: '15px', fontSize: '13px' }}>
-                    <strong>Previous Closing Stock (from {previousClosingStock.date}):</strong> Ksh {formatKsh(previousClosingStock.amount)}
-                    <br/><span style={{ color: '#666' }}>Enter your current physical stock below to analyze branch progress.</span>
+                <div style={{ display: 'flex', gap: '10px', marginBottom: '10px' }}>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ display: 'block', fontWeight: 'bold', fontSize: '12px', marginBottom: '4px' }}>Previous Closing Stock (Manual)</label>
+                    <input type="number" value={prevClosingStock} onChange={e => setPrevClosingStock(e.target.value)} placeholder="e.g. Last month's value" style={{ width: '100%', padding: '10px', border: '1px solid #ccc', borderRadius: '4px', backgroundColor: '#fff9e6' }} />
                   </div>
-                )}
+                </div>
 
                 <div style={{ display: 'flex', gap: '10px' }}>
                   <div style={{ flex: 1 }}>
